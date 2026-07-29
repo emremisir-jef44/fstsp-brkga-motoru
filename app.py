@@ -71,7 +71,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: DETERMINISTIK ÇÖZÜCÜ (100% KAPSAMA GARANTİLİ)
+# 2. MODÜL: AKILLI & OTOMATİK ONARIMLI ÇÖZÜCÜ
 # ==========================================
 class SmartDecoder:
     def __init__(self, parsed_data):
@@ -90,7 +90,7 @@ class SmartDecoder:
             else:
                 modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
-        # Onarım (Repair) Kuralı: Peş peşe D gelmesini önle
+        # Onarım Kuralı: Peş peşe D gelmesini önle
         last_mode = 'T'
         for cust in sorted_customers:
             if modes[cust] == 'D':
@@ -121,6 +121,17 @@ class SmartDecoder:
             d_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'D']
             t_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'T']
             
+            # OTOMATİK ONARIM: Birden fazla dron veya batarya aşımı varsa kamyona çevir
+            if len(d_nodes) > 1:
+                t_nodes.extend(d_nodes)
+                d_nodes = []
+            elif len(d_nodes) == 1:
+                drone_cust = d_nodes[0]
+                drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
+                if drone_time > self.data.max_fly:
+                    t_nodes.append(drone_cust)
+                    d_nodes = []
+            
             curr = node_u
             truck_seg_time = 0.0
             for t_node in t_nodes:
@@ -133,14 +144,10 @@ class SmartDecoder:
             if len(d_nodes) == 1:
                 drone_cust = d_nodes[0]
                 drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
-                if drone_time > self.data.max_fly:
-                    return float('inf'), [], []
                 seg_cost = max(truck_seg_time, drone_time)
                 drone_trips.append((node_u, drone_cust, node_v))
-            elif len(d_nodes) == 0:
-                seg_cost = truck_seg_time
             else:
-                return float('inf'), [], []
+                seg_cost = truck_seg_time
                 
             total_cost += seg_cost
             
