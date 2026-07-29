@@ -9,6 +9,15 @@ import os
 import re
 
 # ==========================================
+# NUMBA KONTROLÜ (C++ HIZI İÇİN)
+# ==========================================
+try:
+    from numba import njit
+except ImportError:
+    st.error("⚠️ HATA: 'numba' kütüphanesi eksik! Lütfen terminale 'pip install numba' yazın.")
+    st.stop()
+
+# ==========================================
 # 1. MODÜL: DİNAMİK VERİ OKUYUCU (PARSER)
 # ==========================================
 class FSTSP_Parser:
@@ -71,86 +80,116 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: HIZLANDIRILMIŞ KUSURSUZ DAG (DP SPLIT + PRUNING)
+# 2. MODÜL: NUMBA JIT DESTEKLİ IŞIK HIZINDA ÇÖZÜCÜ
 # ==========================================
+@njit
+def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly):
+    customers = np.arange(1, num_nodes)
+    sorted_indices = np.argsort(rk_route)
+    sorted_customers = customers[sorted_indices]
+
+    seq = np.zeros(num_nodes + 1, dtype=np.int32)
+    seq[1:num_nodes] = sorted_customers
+    seq[0] = 0
+    seq[num_nodes] = 0
+
+    N = num_nodes + 1
+    cost = np.full(N, np.inf)
+    cost[0] = 0.0
+    path_prev = np.zeros(N, dtype=np.int32)
+    path_drone = np.full(N, -1, dtype=np.int32)
+
+    WINDOW_SIZE = 12
+    pure_t = np.zeros(N)
+
+    for i in range(N - 1):
+        if cost[i] == np.inf:
+            continue
+
+        limit_j = min(N, i + WINDOW_SIZE)
+        curr_dist = 0.0
+        for j in range(i + 1, limit_j):
+            curr_dist += t_matrix[seq[j-1], seq[j]]
+            pure_t[j] = curr_dist
+
+        for j in range(i + 1, limit_j):
+            # Durum 1: Sadece Kamyon
+            if cost[i] + pure_t[j] < cost[j]:
+                cost[j] = cost[i] + pure_t[j]
+                path_prev[j] = i
+                path_drone[j] = -1
+
+            # Durum 2: Kamyon + Dron (Eşzamanlı)
+            if j >= i + 2:
+                for k in range(i + 1, j):
+                    drone_cust = seq[k]
+                    if novisit_mask[drone_cust]:
+                        continue
+
+                    d_time = d_matrix[seq[i], drone_cust] + d_matrix[drone_cust, seq[j]]
+                    if d_time > max_fly:
+                        continue
+
+                    t_skip = pure_t[j] - t_matrix[seq[k-1], seq[k]] - t_matrix[seq[k], seq[k+1]] + t_matrix[seq[k-1], seq[k+1]]
+                    seg_time = max(t_skip, d_time)
+
+                    if cost[i] + seg_time < cost[j]:
+                        cost[j] = cost[i] + seg_time
+                        path_prev[j] = i
+                        path_drone[j] = drone_cust
+
+    return cost[N-1], path_prev, path_drone, seq
+
+
 class DPSplitDecoder:
     def __init__(self, parsed_data):
         self.data = parsed_data
         self.t = parsed_data.truck_time_matrix
         self.d = parsed_data.drone_time_matrix
+        self.num_nodes = parsed_data.num_nodes
+        self.max_fly = parsed_data.max_fly
+        
+        # Numba için boolean array
+        self.novisit_mask = np.zeros(self.num_nodes, dtype=np.bool_)
+        for nv in parsed_data.novisit_list:
+            self.novisit_mask[nv] = True
 
     def decode(self, rk_route):
-        customers = list(range(1, self.data.num_nodes))
-        sorted_customers = [cust for _, cust in sorted(zip(rk_route, customers))]
-        seq = [0] + sorted_customers + [0]
+        rk_arr = np.array(rk_route, dtype=np.float64)
+        
+        cost, path_prev, path_drone, seq = numba_fast_dp_decode(
+            rk_arr, self.t, self.d, self.num_nodes, self.novisit_mask, self.max_fly
+        )
+
         N = len(seq)
-        
-        cost = [float('inf')] * N
-        cost[0] = 0.0
-        path = [None] * N
-        
-        # PRUNING (Budama) - Kamyon ve dron operasyonu arasına girecek maksimum durak sayısı
-        WINDOW_SIZE = 12 
-        
-        # Hızlandırılmış O(N * K^2) DP Araması
-        for i in range(N - 1):
-            if cost[i] == float('inf'): continue
-            
-            pure_t = [0.0] * N
-            # Sadece mantıklı olan o küçük "WINDOW_SIZE" penceresini tara!
-            limit_j = min(N, i + WINDOW_SIZE) 
-            
-            for j in range(i + 1, limit_j):
-                pure_t[j] = pure_t[j-1] + self.t[seq[j-1]][seq[j]]
-                
-                # Durum 1: Kamyon hiçbir dron kullanmadan i'den j'ye kadar tüm düğümleri gezer
-                if cost[i] + pure_t[j] < cost[j]:
-                    cost[j] = cost[i] + pure_t[j]
-                    path[j] = (i, None)
-                    
-                # Durum 2: Kamyon aradaki düğümleri gezerken, Dron tek bir k düğümünü halleder
-                if j >= i + 2:
-                    for k_idx in range(i + 1, j):
-                        drone_cust = seq[k_idx]
-                        if drone_cust in self.data.novisit_list:
-                            continue 
-                            
-                        d_time = self.d[seq[i]][drone_cust] + self.d[drone_cust][seq[j]]
-                        if d_time > self.data.max_fly:
-                            continue 
-                            
-                        t_skip = pure_t[j] - self.t[seq[k_idx-1]][seq[k_idx]] - self.t[seq[k_idx]][seq[k_idx+1]] + self.t[seq[k_idx-1]][seq[k_idx+1]]
-                        
-                        seg_time = max(t_skip, d_time)
-                        if cost[i] + seg_time < cost[j]:
-                            cost[j] = cost[i] + seg_time
-                            path[j] = (i, drone_cust)
-                            
+        if cost == np.inf:
+            return float('inf'), [], []
+
         # Backtracking
         curr = N - 1
         segments = []
         while curr != 0:
-            prev_i, drone_cust = path[curr]
-            segments.append((prev_i, curr, drone_cust))
+            prev_i = path_prev[curr]
+            drone_cust = path_drone[curr]
+            segments.append((prev_i, curr, drone_cust if drone_cust != -1 else None))
             curr = prev_i
             
         segments.reverse()
-        
         truck_route = [0]
         drone_trips = []
         
         for prev_i, curr_i, drone_cust in segments:
             for x in range(prev_i + 1, curr_i + 1):
                 if seq[x] != drone_cust:
-                    truck_route.append(seq[x])
+                    truck_route.append(int(seq[x]))
             
             if drone_cust is not None:
-                drone_trips.append((seq[prev_i], drone_cust, seq[curr_i]))
+                drone_trips.append((int(seq[prev_i]), int(drone_cust), int(seq[curr_i])))
                 
-        return cost[N-1], truck_route, drone_trips
+        return cost, truck_route, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU (SAF & ODAKLI)
+# 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -208,9 +247,10 @@ class BRKGA_Engine:
                 
             population = next_gen
             
+            # Saniyede yüzlerce jenerasyon akacağı için güncellemeyi 10'da bir yapıyoruz
             if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"🚀 Işık Hızında O(N) DP ile Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | Skor: {best_solution['fitness']:.2f}")
+                status_text.text(f"🔥 Numba JIT Derleyicisi Devrede... Jenerasyon {gen+1}/{self.max_gen} | Skor: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Tamamlandı! Bulunan Optimum Süre: {best_solution['fitness']:.2f}")
@@ -239,7 +279,7 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
                              text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Optimum Rota Haritası (Hızlandırılmış O(N) DP)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
+    fig.update_layout(title="🚁 FSTSP Optimum Rota (O(N) DP & Numba JIT)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
                       plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
     return fig
 
@@ -252,11 +292,11 @@ def natural_sort_key(s):
 # ==========================================
 # STREAMLIT WEB APP ARAYÜZÜ
 # ==========================================
-st.set_page_config(page_title="FSTSP BRKGA Fast-DP", layout="wide")
-st.title("🚁 FSTSP: Hızlı DP-Split DAG Optimizasyon Motoru")
+st.set_page_config(page_title="FSTSP BRKGA Numba", layout="wide")
+st.title("🚁 FSTSP: Numba JIT Destekli DP-Split Motoru")
 
 st.sidebar.header("BRKGA Parametreleri")
-pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
+pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 500, 10)
 elite_ratio = st.sidebar.slider("Elit Oranı (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
@@ -289,7 +329,7 @@ else:
     col3.metric("Dron Çarpanı", parsed_data.drone_speed)
     col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 Hızlı DP-Split BRKGA'yı Başlat"):
+    if st.button("🚀 Numba JIT Çözücü ile Başlat"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
