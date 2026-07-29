@@ -123,17 +123,21 @@ class SmartDecoder:
                 
                 elif len(d_nodes) == 1 and len(t_nodes) == (j - i - 1):
                     drone_cust = d_nodes[0]
-                    drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
                     
-                    truck_time, curr = 0, node_u
-                    for internal_node in t_nodes:
-                        truck_time += self.t_matrix[curr][internal_node]
-                        curr = internal_node
-                    truck_time += self.t_matrix[curr][node_v]
-                    
-                    max_time = max(truck_time, drone_time)
-                    if max_time <= self.data.max_fly:
-                        G.add_edge(idx_start, idx_end, weight=max_time, drone_node=drone_cust)
+                    # KRİTİK DÜZELTME: Kalkış (node_u) ve Varış (node_v) ASLA DEPO (0) olamaz!
+                    # Dron sadece gerçek müşterilerden kalkıp gerçek müşterilere inebilir.
+                    if node_u != 0 and node_v != 0:
+                        drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
+                        
+                        truck_time, curr = 0, node_u
+                        for internal_node in t_nodes:
+                            truck_time += self.t_matrix[curr][internal_node]
+                            curr = internal_node
+                        truck_time += self.t_matrix[curr][node_v]
+                        
+                        max_time = max(truck_time, drone_time)
+                        if max_time <= self.data.max_fly:
+                            G.add_edge(idx_start, idx_end, weight=max_time, drone_node=drone_cust)
 
         try:
             path = nx.shortest_path(G, source=0, target=len(sequence)-1, weight='weight')
