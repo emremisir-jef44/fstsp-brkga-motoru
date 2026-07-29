@@ -90,6 +90,7 @@ class SmartDecoder:
             else:
                 modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
+        # Onarım (Repair) Kuralı: Peş peşe D gelmesini önle
         last_mode = 'T'
         for cust in sorted_customers:
             if modes[cust] == 'D':
@@ -123,9 +124,6 @@ class SmartDecoder:
                 
                 elif len(d_nodes) == 1 and len(t_nodes) == (j - i - 1):
                     drone_cust = d_nodes[0]
-                    
-                    # KRİTİK DÜZELTME: Kalkış (node_u) ve Varış (node_v) ASLA DEPO (0) olamaz!
-                    # Dron sadece gerçek müşterilerden kalkıp gerçek müşterilere inebilir.
                     if node_u != 0 and node_v != 0:
                         drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
                         
@@ -144,18 +142,33 @@ class SmartDecoder:
             cost = nx.shortest_path_length(G, source=0, target=len(sequence)-1, weight='weight')
             
             truck_route, drone_trips = [], []
+            visited_nodes = set() # Ziyaret edilenleri takip etmek için
+            
             for i in range(len(path)-1):
                 u, v = path[i], path[i+1]
                 edge = G.get_edge_data(u, v)
+                
+                # Kamyonun uğradığı düğümleri ve aradaki iç düğümleri ekle
+                sub_nodes = sequence[path[i]:path[i+1]+1]
+                for node in sub_nodes:
+                    if node != 0: visited_nodes.add(node)
+                    
                 truck_route.append(sequence[u])
                 if edge['drone_node'] is not None:
                     drone_trips.append((sequence[u], edge['drone_node'], sequence[v]))
+                    visited_nodes.add(edge['drone_node']) # Dronun ziyaret ettiği düğümü ekle
+                    
             truck_route.append(sequence[path[-1]])
             
+            # KRİTİK KONTROL: Tüm müşteriler (1'den n-1'e) ziyaret edildi mi? Edilmediyse bu çözüm geçersizdir!
+            all_customers = set(range(1, self.data.num_nodes))
+            if not all_customers.issubset(visited_nodes):
+                return float('inf'), [], []
+            
             return cost, truck_route, drone_trips
+            
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return float('inf'), [], []
-
 # ==========================================
 # 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
