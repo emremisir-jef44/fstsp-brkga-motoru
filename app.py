@@ -71,7 +71,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: AKILLI & OTOMATİK ONARIMLI ÇÖZÜCÜ
+# 2. MODÜL: MULTI-TRIP (SUBTOUR) AKILLI ÇÖZÜCÜ
 # ==========================================
 class SmartDecoder:
     def __init__(self, parsed_data):
@@ -79,7 +79,7 @@ class SmartDecoder:
         self.t_matrix = parsed_data.truck_time_matrix
         self.d_matrix = parsed_data.drone_time_matrix
 
-    def decode(self, rk_route, rk_modes):
+    def decode(self, rk_route, rk_modes, rk_splits):
         customers = list(range(1, self.data.num_nodes))
         sorted_customers = [cust for _, cust in sorted(zip(rk_route, customers))]
         
@@ -102,14 +102,48 @@ class SmartDecoder:
             else:
                 last_mode = 'T'
                 
-        sequence = [0] + sorted_customers + [0]
+        # Multi-Trip Parçalama: rk_splits veya boyut kısıtına göre alt turlara (subtours) böl
+        subtours_nodes = []
+        current_subtour = []
+        
+        for cust in sorted_customers:
+            current_subtour.append(cust)
+            cust_idx = customers.index(cust)
+            # rk_splits eşiği veya alt tur uzunluğu dolduğunda kamyon depoya döner (yeni alt tur başlar)
+            if rk_splits[cust_idx] > 0.70 or len(current_subtour) >= 5:
+                subtours_nodes.append(current_subtour)
+                current_subtour = []
+        if current_subtour:
+            subtours_nodes.append(current_subtour)
+            
+        total_makespan = 0.0
+        full_truck_route = [0]
+        all_drone_trips = []
+        
+        for subtour_custs in subtours_nodes:
+            if not subtour_custs:
+                continue
+            seq = [0] + subtour_custs + [0]
+            sub_cost, sub_truck, sub_drones = self._decode_single_subtour(seq, modes)
+            if sub_cost == float('inf'):
+                return float('inf'), [], []
+            
+            total_makespan += sub_cost
+            full_truck_route.extend(sub_truck[1:])
+            all_drone_trips.extend(sub_drones)
+            
+        cleaned_truck_route = [full_truck_route[0]]
+        for node in full_truck_route[1:]:
+            if node != cleaned_truck_route[-1]:
+                cleaned_truck_route.append(node)
+                
+        return total_makespan, cleaned_truck_route, all_drone_trips
+
+    def _decode_single_subtour(self, sequence, modes):
         t_indices = [idx for idx, node in enumerate(sequence) if modes.get(node, 'T') == 'T']
-        
-        total_cost = 0.0
-        truck_route = []
+        subtour_cost = 0.0
+        truck_seg_nodes = [sequence[t_indices[0]]]
         drone_trips = []
-        
-        truck_route.append(sequence[t_indices[0]])
         
         for i in range(len(t_indices) - 1):
             idx_start = t_indices[i]
@@ -121,7 +155,7 @@ class SmartDecoder:
             d_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'D']
             t_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'T']
             
-            # OTOMATİK ONARIM: Birden fazla dron veya batarya aşımı varsa kamyona çevir
+            # Otomatik Onarım
             if len(d_nodes) > 1:
                 t_nodes.extend(d_nodes)
                 d_nodes = []
@@ -136,10 +170,10 @@ class SmartDecoder:
             truck_seg_time = 0.0
             for t_node in t_nodes:
                 truck_seg_time += self.t_matrix[curr][t_node]
-                truck_route.append(t_node)
+                truck_seg_nodes.append(t_node)
                 curr = t_node
             truck_seg_time += self.t_matrix[curr][node_v]
-            truck_route.append(node_v)
+            truck_seg_nodes.append(node_v)
             
             if len(d_nodes) == 1:
                 drone_cust = d_nodes[0]
@@ -149,17 +183,12 @@ class SmartDecoder:
             else:
                 seg_cost = truck_seg_time
                 
-            total_cost += seg_cost
+            subtour_cost += seg_cost
             
-        cleaned_truck_route = [truck_route[0]]
-        for node in truck_route[1:]:
-            if node != cleaned_truck_route[-1]:
-                cleaned_truck_route.append(node)
-                
-        return total_cost, cleaned_truck_route, drone_trips
+        return subtour_cost, truck_seg_nodes, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU
+# 3. MODÜL: BRKGA EVRİM MOTORU (MULTI-TRIP)
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -175,11 +204,12 @@ class BRKGA_Engine:
         return {
             'route': [random.random() for _ in range(self.num_cust)],
             'mode': [random.random() for _ in range(self.num_cust)],
+            'splits': [random.random() for _ in range(self.num_cust)],
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
 
     def evaluate(self, ind):
-        cost, t_route, d_trips = self.decoder.decode(ind['route'], ind['mode'])
+        cost, t_route, d_trips = self.decoder.decode(ind['route'], ind['mode'], ind['splits'])
         ind['fitness'] = cost
         ind['truck_route'] = t_route
         ind['drone_trips'] = d_trips
@@ -209,10 +239,11 @@ class BRKGA_Engine:
                 parent_a = random.choice(elites)
                 parent_b = random.choice(non_elites) if non_elites else random.choice(elites)
                 
-                child = {'route': [], 'mode': [], 'fitness': float('inf')}
+                child = {'route': [], 'mode': [], 'splits': [], 'fitness': float('inf')}
                 for i in range(self.num_cust):
                     child['route'].append(parent_a['route'][i] if random.random() < self.rho_e else parent_b['route'][i])
                     child['mode'].append(parent_a['mode'][i] if random.random() < self.rho_e else parent_b['mode'][i])
+                    child['splits'].append(parent_a['splits'][i] if random.random() < self.rho_e else parent_b['splits'][i])
                 
                 self.evaluate(child)
                 next_gen.append(child)
@@ -221,7 +252,7 @@ class BRKGA_Engine:
             
             if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | En İyi Süre: {best_solution['fitness']:.2f}")
+                status_text.text(f"Multi-Trip Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | En İyi Süre: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Tamamlandı! Bulunan Optimum Süre: {best_solution['fitness']:.2f}")
@@ -250,7 +281,7 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
                              text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Optimum Rota Haritası", xaxis_title="X", yaxis_title="Y", hovermode="closest",
+    fig.update_layout(title="🚁 FSTSP Multi-Trip Optimum Rota Haritası", xaxis_title="X", yaxis_title="Y", hovermode="closest",
                       plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
     return fig
 
@@ -263,8 +294,8 @@ def natural_sort_key(s):
 # ==========================================
 # STREAMLIT WEB APP ARAYÜZÜ
 # ==========================================
-st.set_page_config(page_title="FSTSP BRKGA Motoru", layout="wide")
-st.title("🚁 FSTSP: Dinamik BRKGA Optimizasyon Motoru")
+st.set_page_config(page_title="FSTSP Multi-Trip BRKGA", layout="wide")
+st.title("🚁 FSTSP: Multi-Trip (Subtour) BRKGA Optimizasyon Motoru")
 
 st.sidebar.header("BRKGA Parametreleri")
 pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
@@ -300,7 +331,7 @@ else:
     col3.metric("Dron Çarpanı", parsed_data.drone_speed)
     col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 Akıllı Çözücü ile BRKGA'yı Başlat"):
+    if st.button("🚀 Multi-Trip BRKGA'yı Başlat"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
