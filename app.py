@@ -71,7 +71,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: AKILLI VE STRATEJİK ÇÖZÜCÜ (SMART DECODER)
+# 2. MODÜL: DETERMINISTIK ÇÖZÜCÜ (100% KAPSAMA GARANTİLİ)
 # ==========================================
 class SmartDecoder:
     def __init__(self, parsed_data):
@@ -83,24 +83,12 @@ class SmartDecoder:
         customers = list(range(1, self.data.num_nodes))
         sorted_customers = [cust for _, cust in sorted(zip(rk_route, customers))]
         
-        # Stratejik Eşik Hesaplama: Dron potansiyeli yüksek (izole/sapa) düğümler için eşik esnetilir
-        depot_coords = (self.data.nodes[0][1], self.data.nodes[0][2])
         modes = {0: 'T'}
-        
         for i, cust in enumerate(customers):
             if cust in self.data.novisit_list:
                 modes[cust] = 'T'
             else:
-                # Düğümün depoya ve diğerlerine olan ortalama mesafesine bakarak akıllı eşik belirleme
-                cust_coords = (self.data.nodes[cust][1], self.data.nodes[cust][2])
-                dist_to_depot = math.hypot(cust_coords[0] - depot_coords[0], cust_coords[1] - depot_coords[1])
-                
-                # Sapa / uzak noktalar için dron olma olasılığı artırılır (adaptif eşik)
-                adaptive_threshold = 0.5
-                if dist_to_depot > 40:  # Uzaktaki noktalar dron için daha avantajlıdır
-                    adaptive_threshold = 0.4 
-                    
-                modes[cust] = 'D' if rk_modes[i] >= adaptive_threshold else 'T'
+                modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
         # Onarım (Repair) Kuralı: Peş peşe D gelmesini önle
         last_mode = 'T'
