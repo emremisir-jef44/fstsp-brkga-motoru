@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import math
 import random
 import time
+import os  # BU YENİ EKLENDİ
 
 # ==========================================
 # 1. MODÜL: DİNAMİK VERİ OKUYUCU (PARSER)
@@ -262,11 +263,29 @@ mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
 
-uploaded_file = st.file_uploader("txt dosyasını sürükleyin", type=["txt"])
+# --- DİNAMİK DOSYA SEÇİCİ (YENİ EKLENEN KISIM) ---
+st.subheader("1. Veri Seti Seçimi")
 
-if uploaded_file:
-    parsed_data = FSTSP_Parser(uploaded_file.read().decode("utf-8"))
-    st.success("Dosya başarıyla okundu!")
+# datasets klasöründeki tüm txt dosyalarını bul
+dataset_folder = "datasets"
+if os.path.exists(dataset_folder):
+    available_files = [f for f in os.listdir(dataset_folder) if f.endswith('.txt')]
+else:
+    available_files = []
+
+if not available_files:
+    st.error(f"⚠️ '{dataset_folder}' klasörü bulunamadı veya içinde .txt dosyası yok! Lütfen GitHub'a dosyaları yükleyin.")
+else:
+    # Açılır menü (Selectbox) ile dosya seçimi
+    selected_file = st.selectbox("Çalıştırmak istediğiniz veri setini seçin:", available_files)
+    
+    # Seçilen dosyanın yolunu oluştur ve oku
+    file_path = os.path.join(dataset_folder, selected_file)
+    with open(file_path, 'r', encoding='utf-8') as f:
+        file_content = f.read()
+
+    parsed_data = FSTSP_Parser(file_content)
+    st.success(f"✅ {selected_file} başarıyla yüklendi!")
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Toplam Düğüm", parsed_data.num_nodes)
