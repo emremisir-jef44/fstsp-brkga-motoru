@@ -1,4 +1,5 @@
 import streamlit as st
+import plotly.graph_objects as go
 import numpy as np
 import math
 
@@ -126,3 +127,72 @@ if uploaded_file is not None:
 
 else:
     st.warning("Lütfen başlamak için bir txt dosyası yükleyin.")
+
+# ==========================================
+# MODÜL 4: İNTERAKTİF HARİTA GÖRSELLEŞTİRME
+# ==========================================
+def draw_interactive_map(nodes_data, truck_route, drone_trips):
+    """
+    nodes_data: [(id, x, y), ...] formatında tüm düğümler
+    truck_route: [0, 2, 4, 1, 5, 0] gibi sırayla ziyaret edilen kamyon düğümleri
+    drone_trips: [(kalkış, ziyaret, varış), ...] formatında dron operasyonları
+    """
+    fig = go.Figure()
+    
+    # Düğüm verilerini ID'ye göre sözlüğe (dictionary) çevir (Hızlı erişim için)
+    nodes_dict = {node[0]: (node[1], node[2]) for node in nodes_data}
+    
+    # 1. Kamyon Rotasını Çiz (Koyu Mavi, Düz Çizgi)
+    truck_x = [nodes_dict[n][0] for n in truck_route]
+    truck_y = [nodes_dict[n][1] for n in truck_route]
+    
+    fig.add_trace(go.Scatter(
+        x=truck_x, y=truck_y, 
+        mode='lines+markers+text',
+        name='Kamyon Rotası',
+        text=[str(n) for n in truck_route], # Düğüm ID'lerini üstüne yaz
+        textposition="bottom center",
+        line=dict(color='#1f77b4', width=3),
+        marker=dict(size=10, color='#1f77b4', symbol='circle')
+    ))
+    
+    # 2. Dron Operasyonlarını Çiz (Kırmızı, Kesik Çizgi)
+    for i, trip in enumerate(drone_trips):
+        launch, visit, return_node = trip
+        dx = [nodes_dict[launch][0], nodes_dict[visit][0], nodes_dict[return_node][0]]
+        dy = [nodes_dict[launch][1], nodes_dict[visit][1], nodes_dict[return_node][1]]
+        
+        fig.add_trace(go.Scatter(
+            x=dx, y=dy, 
+            mode='lines+markers+text',
+            name=f'Dron (Tur {i+1})',
+            text=["", str(visit), ""], # Sadece dronun gittiği hedefi numaralandır
+            textposition="top center",
+            line=dict(color='#d62728', width=2, dash='dashdot'),
+            marker=dict(size=8, color='#d62728', symbol='diamond')
+        ))
+        
+    # 3. Depoyu Vurgula (Büyük Siyah Kare)
+    depot_x, depot_y = nodes_dict[0]
+    fig.add_trace(go.Scatter(
+        x=[depot_x], y=[depot_y], 
+        mode='markers+text',
+        name='Depo',
+        text=["DEPO"],
+        textposition="top center",
+        marker=dict(size=16, color='black', symbol='square')
+    ))
+    
+    # Harita Ayarları
+    fig.update_layout(
+        title="🚁 FSTSP Optimum Rota Haritası",
+        xaxis_title="X Koordinatı",
+        yaxis_title="Y Koordinatı",
+        hovermode="closest",
+        plot_bgcolor='white',
+        xaxis=dict(showgrid=True, gridcolor='lightgray'),
+        yaxis=dict(showgrid=True, gridcolor='lightgray'),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+    )
+    
+    return fig
