@@ -98,7 +98,7 @@ class SmartDecoder:
                     modes[cust] = 'T'
                     last_mode = 'T'
                 else:
-                    modes[cust] = 'D'
+                    last_mode = 'D'
             else:
                 last_mode = 'T'
                 
@@ -152,7 +152,7 @@ class SmartDecoder:
         return total_cost, cleaned_truck_route, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU (SAF & GÜÇLÜ)
+# 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -264,7 +264,7 @@ pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
 elite_ratio = st.sidebar.slider("Elit Oranı (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
-max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=250, min_value=10, max_value=2000)
+max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
 
 st.subheader("1. Veri Seti Seçimi")
 
