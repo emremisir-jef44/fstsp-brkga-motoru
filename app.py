@@ -93,6 +93,9 @@ class SmartDecoder:
         
         G = nx.DiGraph()
         
+        # HATA DÜZELTMESİ: Tüm Kamyon (T) düğümlerini peşin peşin grafa ekle (NodeNotFound hatasını önler)
+        G.add_nodes_from(t_nodes_in_seq)
+        
         for i in range(len(t_nodes_in_seq) - 1):
             idx_start = t_nodes_in_seq[i]
             for j in range(i + 1, len(t_nodes_in_seq)):
@@ -135,9 +138,10 @@ class SmartDecoder:
             truck_route.append(sequence[path[-1]])
             
             return cost, truck_route, drone_trips
-        except nx.NetworkXNoPath:
+            
+        except (nx.NetworkXNoPath, nx.NodeNotFound): 
+            # HATA DÜZELTMESİ: İki hatayı da (Yol yok veya Düğüm yok) güvenli bir şekilde yakalayıp sonsuz maliyet döndürür
             return float('inf'), [], []
-
 # ==========================================
 # 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
