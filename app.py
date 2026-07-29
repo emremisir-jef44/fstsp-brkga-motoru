@@ -71,7 +71,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: AKILLI ÇÖZÜCÜ (SMART DECODER - DAG)
+# 2. MODÜL: DETERMINISTIK ÇÖZÜCÜ (100% KAPSAMA GARANTİLİ)
 # ==========================================
 class SmartDecoder:
     def __init__(self, parsed_data):
@@ -103,70 +103,54 @@ class SmartDecoder:
                 last_mode = 'T'
                 
         sequence = [0] + sorted_customers + [0]
-        t_nodes_in_seq = [idx for idx, node in enumerate(sequence) if modes[node] == 'T']
+        t_indices = [idx for idx, node in enumerate(sequence) if modes.get(node, 'T') == 'T']
         
-        G = nx.DiGraph()
-        G.add_nodes_from(t_nodes_in_seq)
+        total_cost = 0.0
+        truck_route = []
+        drone_trips = []
         
-        for i in range(len(t_nodes_in_seq) - 1):
-            idx_start = t_nodes_in_seq[i]
-            for j in range(i + 1, len(t_nodes_in_seq)):
-                idx_end = t_nodes_in_seq[j]
-                node_u, node_v = sequence[idx_start], sequence[idx_end]
-                
-                sub_seq = sequence[idx_start+1 : idx_end]
-                d_nodes = [n for n in sub_seq if modes[n] == 'D']
-                t_nodes = [n for n in sub_seq if modes[n] == 'T']
-                
-                if len(d_nodes) == 0 and j == i + 1:
-                    cost = self.t_matrix[node_u][node_v]
-                    G.add_edge(idx_start, idx_end, weight=cost, drone_node=None)
-                
-                elif len(d_nodes) == 1 and len(t_nodes) == (j - i - 1):
-                    drone_cust = d_nodes[0]
-                    drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
-                    
-                    truck_time, curr = 0, node_u
-                    for internal_node in t_nodes:
-                        truck_time += self.t_matrix[curr][internal_node]
-                        curr = internal_node
-                    truck_time += self.t_matrix[curr][node_v]
-                    
-                    max_time = max(truck_time, drone_time)
-                    if max_time <= self.data.max_fly:
-                        G.add_edge(idx_start, idx_end, weight=max_time, drone_node=drone_cust)
-
-        try:
-            path = nx.shortest_path(G, source=0, target=len(sequence)-1, weight='weight')
-            cost = nx.shortest_path_length(G, source=0, target=len(sequence)-1, weight='weight')
+        truck_route.append(sequence[t_indices[0]])
+        
+        for i in range(len(t_indices) - 1):
+            idx_start = t_indices[i]
+            idx_end = t_indices[i+1]
+            node_u = sequence[idx_start]
+            node_v = sequence[idx_end]
             
-            truck_route, drone_trips = [], []
-            visited_nodes = set()
+            sub_seq = sequence[idx_start+1 : idx_end]
+            d_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'D']
+            t_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'T']
             
-            for i in range(len(path)-1):
-                u, v = path[i], path[i+1]
-                edge = G.get_edge_data(u, v)
-                
-                sub_nodes = sequence[path[i]:path[i+1]+1]
-                for node in sub_nodes:
-                    if node != 0: visited_nodes.add(node)
-                    
-                truck_route.append(sequence[u])
-                if edge['drone_node'] is not None:
-                    drone_trips.append((sequence[u], edge['drone_node'], sequence[v]))
-                    visited_nodes.add(edge['drone_node'])
-                    
-            truck_route.append(sequence[path[-1]])
+            curr = node_u
+            truck_seg_time = 0.0
+            for t_node in t_nodes:
+                truck_seg_time += self.t_matrix[curr][t_node]
+                truck_route.append(t_node)
+                curr = t_node
+            truck_seg_time += self.t_matrix[curr][node_v]
+            truck_route.append(node_v)
             
-            # KESİN KONTROL: Tüm müşteriler (1'den n-1'e) eksiksiz ziyaret edildi mi?
-            all_customers = set(range(1, self.data.num_nodes))
-            if not all_customers.issubset(visited_nodes):
+            if len(d_nodes) == 1:
+                drone_cust = d_nodes[0]
+                drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
+                if drone_time > self.data.max_fly:
+                    return float('inf'), [], []
+                seg_cost = max(truck_seg_time, drone_time)
+                drone_trips.append((node_u, drone_cust, node_v))
+            elif len(d_nodes) == 0:
+                seg_cost = truck_seg_time
+            else:
                 return float('inf'), [], []
+                
+            total_cost += seg_cost
             
-            return cost, truck_route, drone_trips
-            
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            return float('inf'), [], []
+        cleaned_truck_route = [truck_route[0]]
+        for node in truck_route[1:]:
+            if node != cleaned_truck_route[-1]:
+                cleaned_truck_route.append(node)
+                
+        return total_cost, cleaned_truck_route, drone_trips
+
 # ==========================================
 # 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
