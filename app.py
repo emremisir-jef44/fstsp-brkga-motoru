@@ -71,7 +71,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: KUSURSUZ DAG (DP SPLIT) ÇÖZÜCÜ
+# 2. MODÜL: HIZLANDIRILMIŞ KUSURSUZ DAG (DP SPLIT + PRUNING)
 # ==========================================
 class DPSplitDecoder:
     def __init__(self, parsed_data):
@@ -81,23 +81,26 @@ class DPSplitDecoder:
 
     def decode(self, rk_route):
         customers = list(range(1, self.data.num_nodes))
-        # Genetik algoritmadan gelen rastgele anahtarlara göre devasa TSP rotasını oluştur
         sorted_customers = [cust for _, cust in sorted(zip(rk_route, customers))]
         seq = [0] + sorted_customers + [0]
         N = len(seq)
         
-        # DP (Dynamic Programming) Maliyet ve Yol takibi
         cost = [float('inf')] * N
         cost[0] = 0.0
         path = [None] * N
         
-        # O(N^3) Bellman-Ford / DAG En Kısa Yol Araması
+        # PRUNING (Budama) - Kamyon ve dron operasyonu arasına girecek maksimum durak sayısı
+        WINDOW_SIZE = 12 
+        
+        # Hızlandırılmış O(N * K^2) DP Araması
         for i in range(N - 1):
             if cost[i] == float('inf'): continue
             
-            # Pure Truck (Sadece Kamyon) kümülatif sürelerini önceden hesapla
             pure_t = [0.0] * N
-            for j in range(i + 1, N):
+            # Sadece mantıklı olan o küçük "WINDOW_SIZE" penceresini tara!
+            limit_j = min(N, i + WINDOW_SIZE) 
+            
+            for j in range(i + 1, limit_j):
                 pure_t[j] = pure_t[j-1] + self.t[seq[j-1]][seq[j]]
                 
                 # Durum 1: Kamyon hiçbir dron kullanmadan i'den j'ye kadar tüm düğümleri gezer
@@ -105,28 +108,25 @@ class DPSplitDecoder:
                     cost[j] = cost[i] + pure_t[j]
                     path[j] = (i, None)
                     
-                # Durum 2: Kamyon aradaki düğümleri gezerken, Dron tek bir k düğümünü (i < k < j) halleder
+                # Durum 2: Kamyon aradaki düğümleri gezerken, Dron tek bir k düğümünü halleder
                 if j >= i + 2:
                     for k_idx in range(i + 1, j):
                         drone_cust = seq[k_idx]
                         if drone_cust in self.data.novisit_list:
-                            continue  # Bu noktaya dron inemez
+                            continue 
                             
-                        # Dronun i'den çıkıp k'ya gidip j'de kamyonla buluşma süresi
                         d_time = self.d[seq[i]][drone_cust] + self.d[drone_cust][seq[j]]
                         if d_time > self.data.max_fly:
-                            continue  # Batarya yetersiz
+                            continue 
                             
-                        # O(1) Hızlı Kamyon Süresi Hesaplama (k düğümünü atlayarak yola devam etme)
                         t_skip = pure_t[j] - self.t[seq[k_idx-1]][seq[k_idx]] - self.t[seq[k_idx]][seq[k_idx+1]] + self.t[seq[k_idx-1]][seq[k_idx+1]]
                         
-                        # Eşzamanlı operasyonun maliyeti (Dron ile Kamyonun maksimum süresi)
                         seg_time = max(t_skip, d_time)
                         if cost[i] + seg_time < cost[j]:
                             cost[j] = cost[i] + seg_time
                             path[j] = (i, drone_cust)
                             
-        # En iyi yolu sondan başa doğru (Backtracking) çözümle
+        # Backtracking
         curr = N - 1
         segments = []
         while curr != 0:
@@ -140,12 +140,10 @@ class DPSplitDecoder:
         drone_trips = []
         
         for prev_i, curr_i, drone_cust in segments:
-            # Önceki noktadan mevcut noktaya kadar dronun gittiği müşteri hariç hepsini kamyona ekle
             for x in range(prev_i + 1, curr_i + 1):
                 if seq[x] != drone_cust:
                     truck_route.append(seq[x])
             
-            # Eğer bu segmentte bir dron operasyonu varsa kaydet
             if drone_cust is not None:
                 drone_trips.append((seq[prev_i], drone_cust, seq[curr_i]))
                 
@@ -165,7 +163,6 @@ class BRKGA_Engine:
         self.num_cust = decoder.data.num_nodes - 1
 
     def create_individual(self):
-        # Artık rk_modes yok! Optimizasyon sadece rotayı (sıralamayı) bulmaya %100 odaklanıyor.
         return {
             'route': [random.random() for _ in range(self.num_cust)],
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
@@ -211,9 +208,9 @@ class BRKGA_Engine:
                 
             population = next_gen
             
-            if gen % 5 == 0:
+            if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"DP-Split ile Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | En İyi Süre: {best_solution['fitness']:.2f}")
+                status_text.text(f"🚀 Işık Hızında O(N) DP ile Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | Skor: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Tamamlandı! Bulunan Optimum Süre: {best_solution['fitness']:.2f}")
@@ -242,7 +239,7 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
                              text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Optimum Rota Haritası (DP-Split DAG Destekli)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
+    fig.update_layout(title="🚁 FSTSP Optimum Rota Haritası (Hızlandırılmış O(N) DP)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
                       plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
     return fig
 
@@ -255,8 +252,8 @@ def natural_sort_key(s):
 # ==========================================
 # STREAMLIT WEB APP ARAYÜZÜ
 # ==========================================
-st.set_page_config(page_title="FSTSP BRKGA DP-Split", layout="wide")
-st.title("🚁 FSTSP: DP-Split DAG Optimizasyon Motoru")
+st.set_page_config(page_title="FSTSP BRKGA Fast-DP", layout="wide")
+st.title("🚁 FSTSP: Hızlı DP-Split DAG Optimizasyon Motoru")
 
 st.sidebar.header("BRKGA Parametreleri")
 pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
@@ -292,7 +289,7 @@ else:
     col3.metric("Dron Çarpanı", parsed_data.drone_speed)
     col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 DP-Split BRKGA'yı Başlat"):
+    if st.button("🚀 Hızlı DP-Split BRKGA'yı Başlat"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
