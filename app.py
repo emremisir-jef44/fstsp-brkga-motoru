@@ -152,7 +152,7 @@ class SmartDecoder:
         return total_cost, cleaned_truck_route, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU (GUTED MUTANTS & WARM-START EKLENDİ)
+# 3. MODÜL: BRKGA EVRİM MOTORU (SAF & GÜÇLÜ)
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -164,34 +164,9 @@ class BRKGA_Engine:
         self.decoder = decoder
         self.num_cust = decoder.data.num_nodes - 1
 
-    def create_individual(self, guided=False):
-        if guided:
-            # En Yakın Komşu (Nearest Neighbor) Sezgisel Başlangıcı
-            nodes = self.decoder.data.nodes
-            depot_coords = (nodes[0][1], nodes[0][2])
-            unvisited = list(range(1, self.decoder.data.num_nodes))
-            current_pos = depot_coords
-            nn_order = []
-            
-            while unvisited:
-                closest = min(unvisited, key=lambda c: math.hypot(nodes[c][1] - current_pos[0], nodes[c][2] - current_pos[1]))
-                nn_order.append(closest)
-                current_pos = (nodes[closest][1], nodes[closest][2])
-                unvisited.remove(closest)
-            
-            rk_dict = {}
-            for idx, cust in enumerate(nn_order):
-                base_val = (idx + 1) / (len(nn_order) + 1)
-                noise = random.uniform(-0.08, 0.08) # Kontrollü gürültü
-                rk_dict[cust] = max(0.01, min(0.99, base_val + noise))
-            
-            customers = list(range(1, self.decoder.data.num_nodes))
-            route = [rk_dict[cust] for cust in customers]
-        else:
-            route = [random.random() for _ in range(self.num_cust)]
-            
+    def create_individual(self):
         return {
-            'route': route,
+            'route': [random.random() for _ in range(self.num_cust)],
             'mode': [random.random() for _ in range(self.num_cust)],
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
@@ -203,12 +178,7 @@ class BRKGA_Engine:
         ind['drone_trips'] = d_trips
 
     def run(self, progress_bar, status_text):
-        # İlk Popülasyon: %20 Akıllı Başlangıç (Warm-Start), %80 Rastgele
-        population = []
-        for i in range(self.p):
-            is_guided = (i < int(self.p * 0.2))
-            population.append(self.create_individual(guided=is_guided))
-            
+        population = [self.create_individual() for _ in range(self.p)]
         for ind in population: self.evaluate(ind)
         
         best_solution = None
@@ -223,12 +193,7 @@ class BRKGA_Engine:
             non_elites = population[self.p_e:]
             next_gen.extend(elites)
             
-            # Mutantlar: %50 Yönlendirilmiş (Guided), %50 Tamamen Rastgele
-            mutants = []
-            for _ in range(self.p_m):
-                is_guided = (random.random() < 0.5)
-                mutants.append(self.create_individual(guided=is_guided))
-                
+            mutants = [self.create_individual() for _ in range(self.p_m)]
             for mut in mutants: self.evaluate(mut)
             next_gen.extend(mutants)
             
@@ -299,7 +264,7 @@ pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
 elite_ratio = st.sidebar.slider("Elit Oranı (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
-max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
+max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=250, min_value=10, max_value=2000)
 
 st.subheader("1. Veri Seti Seçimi")
 
