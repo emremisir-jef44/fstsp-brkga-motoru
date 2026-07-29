@@ -71,124 +71,88 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: MULTI-TRIP (SUBTOUR) AKILLI ÇÖZÜCÜ
+# 2. MODÜL: KUSURSUZ DAG (DP SPLIT) ÇÖZÜCÜ
 # ==========================================
-class SmartDecoder:
+class DPSplitDecoder:
     def __init__(self, parsed_data):
         self.data = parsed_data
-        self.t_matrix = parsed_data.truck_time_matrix
-        self.d_matrix = parsed_data.drone_time_matrix
+        self.t = parsed_data.truck_time_matrix
+        self.d = parsed_data.drone_time_matrix
 
-    def decode(self, rk_route, rk_modes, rk_splits):
+    def decode(self, rk_route):
         customers = list(range(1, self.data.num_nodes))
+        # Genetik algoritmadan gelen rastgele anahtarlara göre devasa TSP rotasını oluştur
         sorted_customers = [cust for _, cust in sorted(zip(rk_route, customers))]
+        seq = [0] + sorted_customers + [0]
+        N = len(seq)
         
-        modes = {0: 'T'}
-        for i, cust in enumerate(customers):
-            if cust in self.data.novisit_list:
-                modes[cust] = 'T'
-            else:
-                modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
-                
-        # Onarım Kuralı: Peş peşe D gelmesini önle
-        last_mode = 'T'
-        for cust in sorted_customers:
-            if modes[cust] == 'D':
-                if last_mode == 'D':
-                    modes[cust] = 'T'
-                    last_mode = 'T'
-                else:
-                    modes[cust] = 'D'
-            else:
-                last_mode = 'T'
-                
-        # Multi-Trip Parçalama: rk_splits veya boyut kısıtına göre alt turlara (subtours) böl
-        subtours_nodes = []
-        current_subtour = []
+        # DP (Dynamic Programming) Maliyet ve Yol takibi
+        cost = [float('inf')] * N
+        cost[0] = 0.0
+        path = [None] * N
         
-        for cust in sorted_customers:
-            current_subtour.append(cust)
-            cust_idx = customers.index(cust)
-            # rk_splits eşiği veya alt tur uzunluğu dolduğunda kamyon depoya döner (yeni alt tur başlar)
-            if rk_splits[cust_idx] > 0.70 or len(current_subtour) >= 5:
-                subtours_nodes.append(current_subtour)
-                current_subtour = []
-        if current_subtour:
-            subtours_nodes.append(current_subtour)
+        # O(N^3) Bellman-Ford / DAG En Kısa Yol Araması
+        for i in range(N - 1):
+            if cost[i] == float('inf'): continue
             
-        total_makespan = 0.0
-        full_truck_route = [0]
-        all_drone_trips = []
-        
-        for subtour_custs in subtours_nodes:
-            if not subtour_custs:
-                continue
-            seq = [0] + subtour_custs + [0]
-            sub_cost, sub_truck, sub_drones = self._decode_single_subtour(seq, modes)
-            if sub_cost == float('inf'):
-                return float('inf'), [], []
-            
-            total_makespan += sub_cost
-            full_truck_route.extend(sub_truck[1:])
-            all_drone_trips.extend(sub_drones)
-            
-        cleaned_truck_route = [full_truck_route[0]]
-        for node in full_truck_route[1:]:
-            if node != cleaned_truck_route[-1]:
-                cleaned_truck_route.append(node)
+            # Pure Truck (Sadece Kamyon) kümülatif sürelerini önceden hesapla
+            pure_t = [0.0] * N
+            for j in range(i + 1, N):
+                pure_t[j] = pure_t[j-1] + self.t[seq[j-1]][seq[j]]
                 
-        return total_makespan, cleaned_truck_route, all_drone_trips
-
-    def _decode_single_subtour(self, sequence, modes):
-        t_indices = [idx for idx, node in enumerate(sequence) if modes.get(node, 'T') == 'T']
-        subtour_cost = 0.0
-        truck_seg_nodes = [sequence[t_indices[0]]]
+                # Durum 1: Kamyon hiçbir dron kullanmadan i'den j'ye kadar tüm düğümleri gezer
+                if cost[i] + pure_t[j] < cost[j]:
+                    cost[j] = cost[i] + pure_t[j]
+                    path[j] = (i, None)
+                    
+                # Durum 2: Kamyon aradaki düğümleri gezerken, Dron tek bir k düğümünü (i < k < j) halleder
+                if j >= i + 2:
+                    for k_idx in range(i + 1, j):
+                        drone_cust = seq[k_idx]
+                        if drone_cust in self.data.novisit_list:
+                            continue  # Bu noktaya dron inemez
+                            
+                        # Dronun i'den çıkıp k'ya gidip j'de kamyonla buluşma süresi
+                        d_time = self.d[seq[i]][drone_cust] + self.d[drone_cust][seq[j]]
+                        if d_time > self.data.max_fly:
+                            continue  # Batarya yetersiz
+                            
+                        # O(1) Hızlı Kamyon Süresi Hesaplama (k düğümünü atlayarak yola devam etme)
+                        t_skip = pure_t[j] - self.t[seq[k_idx-1]][seq[k_idx]] - self.t[seq[k_idx]][seq[k_idx+1]] + self.t[seq[k_idx-1]][seq[k_idx+1]]
+                        
+                        # Eşzamanlı operasyonun maliyeti (Dron ile Kamyonun maksimum süresi)
+                        seg_time = max(t_skip, d_time)
+                        if cost[i] + seg_time < cost[j]:
+                            cost[j] = cost[i] + seg_time
+                            path[j] = (i, drone_cust)
+                            
+        # En iyi yolu sondan başa doğru (Backtracking) çözümle
+        curr = N - 1
+        segments = []
+        while curr != 0:
+            prev_i, drone_cust = path[curr]
+            segments.append((prev_i, curr, drone_cust))
+            curr = prev_i
+            
+        segments.reverse()
+        
+        truck_route = [0]
         drone_trips = []
         
-        for i in range(len(t_indices) - 1):
-            idx_start = t_indices[i]
-            idx_end = t_indices[i+1]
-            node_u = sequence[idx_start]
-            node_v = sequence[idx_end]
+        for prev_i, curr_i, drone_cust in segments:
+            # Önceki noktadan mevcut noktaya kadar dronun gittiği müşteri hariç hepsini kamyona ekle
+            for x in range(prev_i + 1, curr_i + 1):
+                if seq[x] != drone_cust:
+                    truck_route.append(seq[x])
             
-            sub_seq = sequence[idx_start+1 : idx_end]
-            d_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'D']
-            t_nodes = [n for n in sub_seq if modes.get(n, 'T') == 'T']
-            
-            # Otomatik Onarım
-            if len(d_nodes) > 1:
-                t_nodes.extend(d_nodes)
-                d_nodes = []
-            elif len(d_nodes) == 1:
-                drone_cust = d_nodes[0]
-                drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
-                if drone_time > self.data.max_fly:
-                    t_nodes.append(drone_cust)
-                    d_nodes = []
-            
-            curr = node_u
-            truck_seg_time = 0.0
-            for t_node in t_nodes:
-                truck_seg_time += self.t_matrix[curr][t_node]
-                truck_seg_nodes.append(t_node)
-                curr = t_node
-            truck_seg_time += self.t_matrix[curr][node_v]
-            truck_seg_nodes.append(node_v)
-            
-            if len(d_nodes) == 1:
-                drone_cust = d_nodes[0]
-                drone_time = self.d_matrix[node_u][drone_cust] + self.d_matrix[drone_cust][node_v]
-                seg_cost = max(truck_seg_time, drone_time)
-                drone_trips.append((node_u, drone_cust, node_v))
-            else:
-                seg_cost = truck_seg_time
+            # Eğer bu segmentte bir dron operasyonu varsa kaydet
+            if drone_cust is not None:
+                drone_trips.append((seq[prev_i], drone_cust, seq[curr_i]))
                 
-            subtour_cost += seg_cost
-            
-        return subtour_cost, truck_seg_nodes, drone_trips
+        return cost[N-1], truck_route, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU (MULTI-TRIP)
+# 3. MODÜL: BRKGA EVRİM MOTORU (SAF & ODAKLI)
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -201,15 +165,14 @@ class BRKGA_Engine:
         self.num_cust = decoder.data.num_nodes - 1
 
     def create_individual(self):
+        # Artık rk_modes yok! Optimizasyon sadece rotayı (sıralamayı) bulmaya %100 odaklanıyor.
         return {
             'route': [random.random() for _ in range(self.num_cust)],
-            'mode': [random.random() for _ in range(self.num_cust)],
-            'splits': [random.random() for _ in range(self.num_cust)],
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
 
     def evaluate(self, ind):
-        cost, t_route, d_trips = self.decoder.decode(ind['route'], ind['mode'], ind['splits'])
+        cost, t_route, d_trips = self.decoder.decode(ind['route'])
         ind['fitness'] = cost
         ind['truck_route'] = t_route
         ind['drone_trips'] = d_trips
@@ -239,20 +202,18 @@ class BRKGA_Engine:
                 parent_a = random.choice(elites)
                 parent_b = random.choice(non_elites) if non_elites else random.choice(elites)
                 
-                child = {'route': [], 'mode': [], 'splits': [], 'fitness': float('inf')}
+                child = {'route': [], 'fitness': float('inf')}
                 for i in range(self.num_cust):
                     child['route'].append(parent_a['route'][i] if random.random() < self.rho_e else parent_b['route'][i])
-                    child['mode'].append(parent_a['mode'][i] if random.random() < self.rho_e else parent_b['mode'][i])
-                    child['splits'].append(parent_a['splits'][i] if random.random() < self.rho_e else parent_b['splits'][i])
                 
                 self.evaluate(child)
                 next_gen.append(child)
                 
             population = next_gen
             
-            if gen % 10 == 0:
+            if gen % 5 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"Multi-Trip Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | En İyi Süre: {best_solution['fitness']:.2f}")
+                status_text.text(f"DP-Split ile Evrimleşiyor... Jenerasyon {gen+1}/{self.max_gen} | En İyi Süre: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Tamamlandı! Bulunan Optimum Süre: {best_solution['fitness']:.2f}")
@@ -281,7 +242,7 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
                              text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Multi-Trip Optimum Rota Haritası", xaxis_title="X", yaxis_title="Y", hovermode="closest",
+    fig.update_layout(title="🚁 FSTSP Optimum Rota Haritası (DP-Split DAG Destekli)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
                       plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
     return fig
 
@@ -294,15 +255,15 @@ def natural_sort_key(s):
 # ==========================================
 # STREAMLIT WEB APP ARAYÜZÜ
 # ==========================================
-st.set_page_config(page_title="FSTSP Multi-Trip BRKGA", layout="wide")
-st.title("🚁 FSTSP: Multi-Trip (Subtour) BRKGA Optimizasyon Motoru")
+st.set_page_config(page_title="FSTSP BRKGA DP-Split", layout="wide")
+st.title("🚁 FSTSP: DP-Split DAG Optimizasyon Motoru")
 
 st.sidebar.header("BRKGA Parametreleri")
 pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 100, 10)
 elite_ratio = st.sidebar.slider("Elit Oranı (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
-max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=250, min_value=10, max_value=2000)
+max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
 
 st.subheader("1. Veri Seti Seçimi")
 
@@ -331,11 +292,11 @@ else:
     col3.metric("Dron Çarpanı", parsed_data.drone_speed)
     col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 Multi-Trip BRKGA'yı Başlat"):
+    if st.button("🚀 DP-Split BRKGA'yı Başlat"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        decoder = SmartDecoder(parsed_data)
+        decoder = DPSplitDecoder(parsed_data)
         engine = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, decoder)
         
         start_time = time.time()
