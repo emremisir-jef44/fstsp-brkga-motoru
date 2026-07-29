@@ -5,7 +5,8 @@ import plotly.graph_objects as go
 import math
 import random
 import time
-import os  # BU YENİ EKLENDİ
+import os
+import re
 
 # ==========================================
 # 1. MODÜL: DİNAMİK VERİ OKUYUCU (PARSER)
@@ -14,8 +15,8 @@ class FSTSP_Parser:
     def __init__(self, file_content):
         self.max_fly = float('inf') 
         self.novisit_list = []
-        self.truck_speed = 1.0 # Aslında Faktör (Çarpan)
-        self.drone_speed = 1.0 # Aslında Faktör (Çarpan)
+        self.truck_speed = 1.0 
+        self.drone_speed = 1.0 
         self.num_nodes = 0
         self.nodes = [] 
         
@@ -65,8 +66,6 @@ class FSTSP_Parser:
                     x1, y1 = self.nodes[i][1], self.nodes[i][2]
                     x2, y2 = self.nodes[j][1], self.nodes[j][2]
                     dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-                    
-                    # DÜZELTME 1: Hızlar faktör olduğu için BÖLME değil ÇARPMA yapılır. (0.5 ise süre yarıya iner)
                     t_matrix[i][j] = dist * self.truck_speed
                     d_matrix[i][j] = dist * self.drone_speed
         return t_matrix, d_matrix
@@ -91,12 +90,11 @@ class SmartDecoder:
             else:
                 modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
-        # DÜZELTME 2: REPAIR (Onarım). Peş peşe gelen D'leri engelle ki yollar kopmasın (inf hatası çözümü)
         last_mode = 'T'
         for cust in sorted_customers:
             if modes[cust] == 'D':
                 if last_mode == 'D':
-                    modes[cust] = 'T' # Çakışmayı önle
+                    modes[cust] = 'T'
                     last_mode = 'T'
                 else:
                     last_mode = 'D'
@@ -251,6 +249,12 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     return fig
 
 # ==========================================
+# YARDIMCI FONKSİYON: DOĞAL SIRALAMA
+# ==========================================
+def natural_sort_key(s):
+    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
+# ==========================================
 # STREAMLIT WEB APP ARAYÜZÜ
 # ==========================================
 st.set_page_config(page_title="FSTSP BRKGA Motoru", layout="wide")
@@ -263,17 +267,54 @@ mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
 
-# --- DİNAMİK VE AKILLI SIRALANMIŞ DOSYA SEÇİCİ ---
-import re
-
-def natural_sort_key(s):
-    # Dosya adındaki sayıları algılayıp matematiksel sıraya dizen akıllı anahtar
-    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+st.subheader("1. Veri Seti Seçimi")
 
 dataset_folder = "datasets"
 if os.path.exists(dataset_folder):
     available_files = [f for f in os.listdir(dataset_folder) if f.endswith('.txt')]
-    # Akıllı Sıralama Uygula
     available_files.sort(key=natural_sort_key)
 else:
     available_files = []
+
+if not available_files:
+    st.error(f"⚠️ '{dataset_folder}' klasörü bulunamadı veya içinde .txt dosyası yok!")
+else:
+    selected_file = st.selectbox("Çalıştırmak istediğiniz veri setini seçin:", available_files)
+    
+    file_path = os.path.join(dataset_folder, selected_file)
+    with open(file_path, 'r', encoding='utf-8') as f:
+        file_content = f.read()
+
+    parsed_data = FSTSP_Parser(file_content)
+    st.success(f"✅ {selected_file} başarıyla yüklendi!")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Toplam Düğüm", parsed_data.num_nodes)
+    col2.metric("Kamyon Çarpanı", parsed_data.truck_speed)
+    col3.metric("Dron Çarpanı", parsed_data.drone_speed)
+    col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
+    
+    if st.button("🚀 Akıllı Çözücü ile BRKGA'yı Başlat"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        decoder = SmartDecoder(parsed_data)
+        engine = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, decoder)
+        
+        start_time = time.time()
+        best_sol = engine.run(progress_bar, status_text)
+        elapsed_time = time.time() - start_time
+        
+        st.subheader("📊 Optimizasyon Sonuçları")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Optimum Süre", f"{best_sol['fitness']:.2f}")
+        c2.metric("Hesaplama Süresi", f"{elapsed_time:.2f} sn")
+        c3.metric("Kamyon Ziyareti", f"{len(best_sol['truck_route'])-2} Düğüm")
+        c4.metric("Dron Ziyareti", f"{len(best_sol['drone_trips'])} Tur")
+        
+        st.plotly_chart(draw_interactive_map(parsed_data.nodes, best_sol['truck_route'], best_sol['drone_trips']), use_container_width=True)
+        
+        with st.expander("Detaylı Rota Dökümü"):
+            st.write("**Kamyon Rotası:**", " ➔ ".join(map(str, best_sol['truck_route'])))
+            for i, trip in enumerate(best_sol['drone_trips']):
+                st.write(f"**Dron Turu {i+1}:** Kalkış: {trip[0]} ➔ Ziyaret: {trip[1]} ➔ Varış: {trip[2]}")
