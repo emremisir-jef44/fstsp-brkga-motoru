@@ -13,8 +13,8 @@ class FSTSP_Parser:
     def __init__(self, file_content):
         self.max_fly = float('inf') 
         self.novisit_list = []
-        self.truck_speed = 1.0
-        self.drone_speed = 1.0
+        self.truck_speed = 1.0 # Aslında Faktör (Çarpan)
+        self.drone_speed = 1.0 # Aslında Faktör (Çarpan)
         self.num_nodes = 0
         self.nodes = [] 
         
@@ -64,8 +64,10 @@ class FSTSP_Parser:
                     x1, y1 = self.nodes[i][1], self.nodes[i][2]
                     x2, y2 = self.nodes[j][1], self.nodes[j][2]
                     dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-                    t_matrix[i][j] = dist / self.truck_speed
-                    d_matrix[i][j] = dist / self.drone_speed
+                    
+                    # DÜZELTME 1: Hızlar faktör olduğu için BÖLME değil ÇARPMA yapılır. (0.5 ise süre yarıya iner)
+                    t_matrix[i][j] = dist * self.truck_speed
+                    d_matrix[i][j] = dist * self.drone_speed
         return t_matrix, d_matrix
 
 # ==========================================
@@ -88,12 +90,22 @@ class SmartDecoder:
             else:
                 modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
+        # DÜZELTME 2: REPAIR (Onarım). Peş peşe gelen D'leri engelle ki yollar kopmasın (inf hatası çözümü)
+        last_mode = 'T'
+        for cust in sorted_customers:
+            if modes[cust] == 'D':
+                if last_mode == 'D':
+                    modes[cust] = 'T' # Çakışmayı önle
+                    last_mode = 'T'
+                else:
+                    last_mode = 'D'
+            else:
+                last_mode = 'T'
+                
         sequence = [0] + sorted_customers + [0]
         t_nodes_in_seq = [idx for idx, node in enumerate(sequence) if modes[node] == 'T']
         
         G = nx.DiGraph()
-        
-        # HATA DÜZELTMESİ: Tüm Kamyon (T) düğümlerini peşin peşin grafa ekle (NodeNotFound hatasını önler)
         G.add_nodes_from(t_nodes_in_seq)
         
         for i in range(len(t_nodes_in_seq) - 1):
@@ -138,10 +150,9 @@ class SmartDecoder:
             truck_route.append(sequence[path[-1]])
             
             return cost, truck_route, drone_trips
-            
-        except (nx.NetworkXNoPath, nx.NodeNotFound): 
-            # HATA DÜZELTMESİ: İki hatayı da (Yol yok veya Düğüm yok) güvenli bir şekilde yakalayıp sonsuz maliyet döndürür
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
             return float('inf'), [], []
+
 # ==========================================
 # 3. MODÜL: BRKGA EVRİM MOTORU
 # ==========================================
@@ -218,14 +229,12 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig = go.Figure()
     nodes_dict = {node[0]: (node[1], node[2]) for node in nodes_data}
     
-    # Kamyon Rotası
     truck_x = [nodes_dict[n][0] for n in truck_route]
     truck_y = [nodes_dict[n][1] for n in truck_route]
     fig.add_trace(go.Scatter(x=truck_x, y=truck_y, mode='lines+markers+text', name='Kamyon Rotası',
                              text=[str(n) for n in truck_route], textposition="bottom center",
                              line=dict(color='#1f77b4', width=3), marker=dict(size=10, color='#1f77b4')))
     
-    # Dron Operasyonları
     for i, (launch, visit, ret) in enumerate(drone_trips):
         dx = [nodes_dict[launch][0], nodes_dict[visit][0], nodes_dict[ret][0]]
         dy = [nodes_dict[launch][1], nodes_dict[visit][1], nodes_dict[ret][1]]
@@ -233,7 +242,6 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
                                  text=["", str(visit), ""], textposition="top center",
                                  line=dict(color='#d62728', width=2, dash='dashdot'), marker=dict(size=8, symbol='diamond')))
         
-    # Depo Vurgusu
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
                              text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
@@ -262,8 +270,8 @@ if uploaded_file:
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Toplam Düğüm", parsed_data.num_nodes)
-    col2.metric("Kamyon Hızı", parsed_data.truck_speed)
-    col3.metric("Dron Hızı", parsed_data.drone_speed)
+    col2.metric("Kamyon Çarpanı", parsed_data.truck_speed)
+    col3.metric("Dron Çarpanı", parsed_data.drone_speed)
     col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
     if st.button("🚀 Akıllı Çözücü ile BRKGA'yı Başlat"):
