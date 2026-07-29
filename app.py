@@ -114,10 +114,6 @@ class SmartDecoder:
                 idx_end = t_nodes_in_seq[j]
                 node_u, node_v = sequence[idx_start], sequence[idx_end]
                 
-                # KRİTİK KURAL: Dron asla Depo'dan (0) kalkamaz ve Depo'ya inemez!
-                if node_u == 0 or node_v == 0:
-                    continue
-                
                 sub_seq = sequence[idx_start+1 : idx_end]
                 d_nodes = [n for n in sub_seq if modes[n] == 'D']
                 t_nodes = [n for n in sub_seq if modes[n] == 'T']
@@ -151,7 +147,6 @@ class SmartDecoder:
                 u, v = path[i], path[i+1]
                 edge = G.get_edge_data(u, v)
                 
-                # Kamyonun ve iç düğümlerin ziyaret ettiği yerleri kaydet
                 sub_nodes = sequence[path[i]:path[i+1]+1]
                 for node in sub_nodes:
                     if node != 0: visited_nodes.add(node)
