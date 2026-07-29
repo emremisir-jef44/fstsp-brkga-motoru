@@ -90,6 +90,7 @@ class SmartDecoder:
             else:
                 modes[cust] = 'D' if rk_modes[i] >= 0.5 else 'T'
                 
+        # Onarım (Repair) Kuralı: Peş peşe D gelmesini önle
         last_mode = 'T'
         for cust in sorted_customers:
             if modes[cust] == 'D':
@@ -112,6 +113,10 @@ class SmartDecoder:
             for j in range(i + 1, len(t_nodes_in_seq)):
                 idx_end = t_nodes_in_seq[j]
                 node_u, node_v = sequence[idx_start], sequence[idx_end]
+                
+                # KRİTİK KURAL: Dron asla Depo'dan (0) kalkamaz ve Depo'ya inemez!
+                if node_u == 0 or node_v == 0:
+                    continue
                 
                 sub_seq = sequence[idx_start+1 : idx_end]
                 d_nodes = [n for n in sub_seq if modes[n] == 'D']
@@ -140,15 +145,31 @@ class SmartDecoder:
             cost = nx.shortest_path_length(G, source=0, target=len(sequence)-1, weight='weight')
             
             truck_route, drone_trips = [], []
+            visited_nodes = set()
+            
             for i in range(len(path)-1):
                 u, v = path[i], path[i+1]
                 edge = G.get_edge_data(u, v)
+                
+                # Kamyonun ve iç düğümlerin ziyaret ettiği yerleri kaydet
+                sub_nodes = sequence[path[i]:path[i+1]+1]
+                for node in sub_nodes:
+                    if node != 0: visited_nodes.add(node)
+                    
                 truck_route.append(sequence[u])
                 if edge['drone_node'] is not None:
                     drone_trips.append((sequence[u], edge['drone_node'], sequence[v]))
+                    visited_nodes.add(edge['drone_node'])
+                    
             truck_route.append(sequence[path[-1]])
             
+            # KESİN KONTROL: Tüm müşteriler (1'den n-1'e) eksiksiz ziyaret edildi mi?
+            all_customers = set(range(1, self.data.num_nodes))
+            if not all_customers.issubset(visited_nodes):
+                return float('inf'), [], []
+            
             return cost, truck_route, drone_trips
+            
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return float('inf'), [], []
 # ==========================================
