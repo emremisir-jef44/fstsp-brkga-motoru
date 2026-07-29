@@ -9,16 +9,16 @@ import os
 import re
 
 # ==========================================
-# NUMBA KONTROLÜ (C++ HIZI İÇİN)
+# NUMBA CHECK (FOR C++ LEVEL SPEED)
 # ==========================================
 try:
     from numba import njit
 except ImportError:
-    st.error("⚠️ HATA: 'numba' kütüphanesi eksik! Lütfen terminale 'pip install numba' yazın.")
+    st.error("⚠️ ERROR: 'numba' library is missing! Please type 'pip install numba' in your terminal.")
     st.stop()
 
 # ==========================================
-# 1. MODÜL: DİNAMİK VERİ OKUYUCU (PARSER)
+# 1. MODULE: DYNAMIC DATA READER (PARSER)
 # ==========================================
 class FSTSP_Parser:
     def __init__(self, file_content):
@@ -80,7 +80,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODÜL: NUMBA JIT DESTEKLİ IŞIK HIZINDA ÇÖZÜCÜ
+# 2. MODULE: NUMBA JIT SUPPORTED LIGHTNING FAST DECODER
 # ==========================================
 @njit
 def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly):
@@ -113,13 +113,13 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
             pure_t[j] = curr_dist
 
         for j in range(i + 1, limit_j):
-            # Durum 1: Sadece Kamyon
+            # Case 1: Truck Only
             if cost[i] + pure_t[j] < cost[j]:
                 cost[j] = cost[i] + pure_t[j]
                 path_prev[j] = i
                 path_drone[j] = -1
 
-            # Durum 2: Kamyon + Dron (Eşzamanlı)
+            # Case 2: Truck + Drone (Simultaneous Operation)
             if j >= i + 2:
                 for k in range(i + 1, j):
                     drone_cust = seq[k]
@@ -149,6 +149,7 @@ class DPSplitDecoder:
         self.num_nodes = parsed_data.num_nodes
         self.max_fly = parsed_data.max_fly
         
+        # Boolean array for Numba JIT compiler
         self.novisit_mask = np.zeros(self.num_nodes, dtype=np.bool_)
         for nv in parsed_data.novisit_list:
             self.novisit_mask[nv] = True
@@ -164,6 +165,7 @@ class DPSplitDecoder:
         if cost == np.inf:
             return float('inf'), [], []
 
+        # Backtracking
         curr = N - 1
         segments = []
         while curr != 0:
@@ -187,7 +189,7 @@ class DPSplitDecoder:
         return cost, truck_route, drone_trips
 
 # ==========================================
-# 3. MODÜL: BRKGA EVRİM MOTORU (AKILLI MUTANTLAR İLE)
+# 3. MODULE: BRKGA EVOLUTION ENGINE
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -202,22 +204,6 @@ class BRKGA_Engine:
     def create_individual(self):
         return {
             'route': [random.random() for _ in range(self.num_cust)],
-            'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
-        }
-        
-    def create_smart_mutant(self, elites):
-        """Orijinal hileler (K-Means vb.) yasak olduğu için kendi elitlerimizi hafifçe sarsarak akıllı mutant yapıyoruz"""
-        parent = random.choice(elites)
-        mutant_route = parent['route'].copy()
-        
-        # Müşterilerin %10'unu rastgele sars (Swap/Shuffle etkisi)
-        num_swaps = max(1, int(self.num_cust * 0.10))
-        for _ in range(num_swaps):
-            idx1, idx2 = random.sample(range(self.num_cust), 2)
-            mutant_route[idx1], mutant_route[idx2] = mutant_route[idx2], mutant_route[idx1]
-            
-        return {
-            'route': mutant_route,
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
 
@@ -243,19 +229,8 @@ class BRKGA_Engine:
             non_elites = population[self.p_e:]
             next_gen.extend(elites)
             
-            # MUTANT STRATEJİSİ (Yarı Rastgele, Yarı Akıllı)
-            mutants = []
-            for _ in range(self.p_m):
-                # %50 ihtimalle tamamen kör uzay araması (Çeşitlilik)
-                # %50 ihtimalle elitleri sarsarak ince ayar araması (Akıllı)
-                if random.random() < 0.5:
-                    new_mut = self.create_smart_mutant(elites)
-                else:
-                    new_mut = self.create_individual()
-                    
-                self.evaluate(new_mut)
-                mutants.append(new_mut)
-                
+            mutants = [self.create_individual() for _ in range(self.p_m)]
+            for mut in mutants: self.evaluate(mut)
             next_gen.extend(mutants)
             
             num_offspring = self.p - self.p_e - self.p_m
@@ -272,16 +247,17 @@ class BRKGA_Engine:
                 
             population = next_gen
             
+            # Updating progress text every 10 generations since Numba processes hundreds per second
             if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"🧠 Akıllı Mutantlar Devrede... Jenerasyon {gen+1}/{self.max_gen} | Skor: {best_solution['fitness']:.2f}")
+                status_text.text(f"🔥 Numba JIT Compiler Active... Generation {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
-        status_text.text(f"Tamamlandı! Bulunan Optimum Süre: {best_solution['fitness']:.2f}")
+        status_text.text(f"Completed! Found Optimum Makespan: {best_solution['fitness']:.2f}")
         return best_solution
 
 # ==========================================
-# 4. MODÜL: İNTERAKTİF HARİTA (PLOTLY)
+# 4. MODULE: INTERACTIVE MAP (PLOTLY)
 # ==========================================
 def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig = go.Figure()
@@ -289,44 +265,44 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     
     truck_x = [nodes_dict[n][0] for n in truck_route]
     truck_y = [nodes_dict[n][1] for n in truck_route]
-    fig.add_trace(go.Scatter(x=truck_x, y=truck_y, mode='lines+markers+text', name='Kamyon Rotası',
+    fig.add_trace(go.Scatter(x=truck_x, y=truck_y, mode='lines+markers+text', name='Truck Route',
                              text=[str(n) for n in truck_route], textposition="bottom center",
                              line=dict(color='#1f77b4', width=3), marker=dict(size=10, color='#1f77b4')))
     
     for i, (launch, visit, ret) in enumerate(drone_trips):
         dx = [nodes_dict[launch][0], nodes_dict[visit][0], nodes_dict[ret][0]]
         dy = [nodes_dict[launch][1], nodes_dict[visit][1], nodes_dict[ret][1]]
-        fig.add_trace(go.Scatter(x=dx, y=dy, mode='lines+markers+text', name=f'Dron (Tur {i+1})',
+        fig.add_trace(go.Scatter(x=dx, y=dy, mode='lines+markers+text', name=f'Drone (Trip {i+1})',
                                  text=["", str(visit), ""], textposition="top center",
                                  line=dict(color='#d62728', width=2, dash='dashdot'), marker=dict(size=8, symbol='diamond')))
         
-    fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depo',
-                             text=["DEPO"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
+    fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depot',
+                             text=["DEPOT"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Optimum Rota (Akıllı Mutant & Numba JIT)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
+    fig.update_layout(title="🚁 FSTSP Optimum Route (O(N) DP & Numba JIT)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
                       plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
     return fig
 
 # ==========================================
-# YARDIMCI FONKSİYON: DOĞAL SIRALAMA
+# HELPER FUNCTION: NATURAL SORTING
 # ==========================================
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
 # ==========================================
-# STREAMLIT WEB APP ARAYÜZÜ
+# STREAMLIT WEB APP UI
 # ==========================================
-st.set_page_config(page_title="FSTSP BRKGA Smart", layout="wide")
-st.title("🚁 FSTSP: Akıllı Mutant Destekli BRKGA Motoru")
+st.set_page_config(page_title="FSTSP BRKGA Numba Engine", layout="wide")
+st.title("🚁 FSTSP: Numba JIT Supported DP-Split Engine")
 
-st.sidebar.header("BRKGA Parametreleri")
-pop_size = st.sidebar.slider("Popülasyon (p)", 50, 500, 500, 10)
-elite_ratio = st.sidebar.slider("Elit Oranı (p_e %)", 5, 40, 20, 5)
-mutant_ratio = st.sidebar.slider("Mutant Oranı (p_m %)", 5, 40, 15, 5)
-rho_e = st.sidebar.slider("Yanlı Çaprazlama (ρ_e)", 0.50, 0.95, 0.70, 0.05)
-max_gen = st.sidebar.number_input("Maksimum Jenerasyon", value=200, min_value=10, max_value=2000)
+st.sidebar.header("BRKGA Parameters")
+pop_size = st.sidebar.slider("Population (p)", 50, 500, 500, 10)
+elite_ratio = st.sidebar.slider("Elite Ratio (p_e %)", 5, 40, 20, 5)
+mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
+rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
+max_gen = st.sidebar.number_input("Maximum Generation", value=200, min_value=10, max_value=2000)
 
-st.subheader("1. Veri Seti Seçimi")
+st.subheader("1. Dataset Selection")
 
 dataset_folder = "datasets"
 if os.path.exists(dataset_folder):
@@ -336,24 +312,24 @@ else:
     available_files = []
 
 if not available_files:
-    st.error(f"⚠️ '{dataset_folder}' klasörü bulunamadı veya içinde .txt dosyası yok!")
+    st.error(f"⚠️ '{dataset_folder}' folder not found or contains no .txt files!")
 else:
-    selected_file = st.selectbox("Çalıştırmak istediğiniz veri setini seçin:", available_files)
+    selected_file = st.selectbox("Select the dataset you want to run:", available_files)
     
     file_path = os.path.join(dataset_folder, selected_file)
     with open(file_path, 'r', encoding='utf-8') as f:
         file_content = f.read()
 
     parsed_data = FSTSP_Parser(file_content)
-    st.success(f"✅ {selected_file} başarıyla yüklendi!")
+    st.success(f"✅ {selected_file} loaded successfully!")
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Toplam Düğüm", parsed_data.num_nodes)
-    col2.metric("Kamyon Çarpanı", parsed_data.truck_speed)
-    col3.metric("Dron Çarpanı", parsed_data.drone_speed)
-    col4.metric("Dron Batarya (MAXFLY)", "Limitsiz" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
+    col1.metric("Total Nodes", parsed_data.num_nodes)
+    col2.metric("Truck Speed Multiplier", parsed_data.truck_speed)
+    col3.metric("Drone Speed Multiplier", parsed_data.drone_speed)
+    col4.metric("Drone Battery (MAXFLY)", "Unlimited" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 Akıllı BRKGA Motorunu Başlat"):
+    if st.button("🚀 Start with Numba JIT Solver"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -364,16 +340,16 @@ else:
         best_sol = engine.run(progress_bar, status_text)
         elapsed_time = time.time() - start_time
         
-        st.subheader("📊 Optimizasyon Sonuçları")
+        st.subheader("📊 Optimization Results")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Optimum Süre", f"{best_sol['fitness']:.2f}")
-        c2.metric("Hesaplama Süresi", f"{elapsed_time:.2f} sn")
-        c3.metric("Kamyon Ziyareti", f"{len(best_sol['truck_route'])-2} Düğüm")
-        c4.metric("Dron Ziyareti", f"{len(best_sol['drone_trips'])} Tur")
+        c1.metric("Optimum Time (Makespan)", f"{best_sol['fitness']:.2f}")
+        c2.metric("Computation Time", f"{elapsed_time:.2f} sec")
+        c3.metric("Truck Visits", f"{len(best_sol['truck_route'])-2} Nodes")
+        c4.metric("Drone Visits", f"{len(best_sol['drone_trips'])} Trips")
         
         st.plotly_chart(draw_interactive_map(parsed_data.nodes, best_sol['truck_route'], best_sol['drone_trips']), use_container_width=True)
         
-        with st.expander("Detaylı Rota Dökümü"):
-            st.write("**Kamyon Rotası:**", " ➔ ".join(map(str, best_sol['truck_route'])))
+        with st.expander("Detailed Route Breakdown"):
+            st.write("**Truck Route:**", " ➔ ".join(map(str, best_sol['truck_route'])))
             for i, trip in enumerate(best_sol['drone_trips']):
-                st.write(f"**Dron Turu {i+1}:** Kalkış: {trip[0]} ➔ Ziyaret: {trip[1]} ➔ Varış: {trip[2]}")
+                st.write(f"**Drone Trip {i+1}:** Launch: {trip[0]} ➔ Visit: {trip[1]} ➔ Rendezvous: {trip[2]}")
