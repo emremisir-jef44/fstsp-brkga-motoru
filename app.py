@@ -331,11 +331,17 @@ class HGVNS_Engine:
         for l, d, r in d_trips:
             l_idx = idx_map.get(l, -1)
             r_idx = len(t_route)-1 if r==0 else idx_map.get(r, -1)
-            if l_idx == -1 or r_idx == -1: continue 
+            
+            # Eğer durak kayıpsa orijinali dön, evaluate_cost inf versin!
+            if l_idx == -1 or r_idx == -1: 
+                return d_trips 
+                
             if l_idx > r_idx:
                 temp_trips.append((r_idx, l_idx, r, d, l)) 
             elif l_idx < r_idx:
                 temp_trips.append((l_idx, r_idx, l, d, r)) 
+            else:
+                return d_trips # l_idx == r_idx durumu, iptal.
                 
         temp_trips.sort(key=lambda x: x[0])
         
@@ -345,10 +351,19 @@ class HGVNS_Engine:
             if trip[0] >= last_ret: 
                 valid_trips.append((trip[2], trip[3], trip[4]))
                 last_ret = trip[1]
+            else:
+                # Çakışma kurtarılamadıysa kargoyu atmak yerine orijinali dön!
+                return d_trips 
                 
         return valid_trips
 
     def evaluate_cost(self, truck_route, drone_trips):
+        # KUSURSUZ GÜVENLİK KİLİDİ: Müşteri kaybı var mı?
+        # Kamyondaki düğüm sayısı (Baştaki ve Sondaki Depot hariç = -2)
+        # Artı drone ile gidilen düğüm sayısı. Toplamı tüm müşterilere eşit olmalı!
+        if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
+            return float('inf')
+
         state_key = (tuple(truck_route), frozenset(drone_trips))
         if state_key in self.eval_memo:
             return self.eval_memo[state_key]
@@ -646,7 +661,6 @@ class HGVNS_Engine:
                 if len(shaken_t) <= 3: break
                 
                 idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
-                
                 shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
             
             shaken_d = self._repair_trips(shaken_t, shaken_d)
