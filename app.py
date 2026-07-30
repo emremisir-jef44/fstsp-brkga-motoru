@@ -322,13 +322,12 @@ class HGVNS_Engine:
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
 
-        def evaluate_cost(self, truck_route, drone_trips):
+    def evaluate_cost(self, truck_route, drone_trips):
         # Kamyon rotası depoda başlamalı ve depoda bitmeli.
         if len(truck_route) < 2 or truck_route[0] != 0 or truck_route[-1] != 0:
             return float('inf')
 
-        # Her müşterinin kamyon veya drone tarafından tam bir kez
-        # ziyaret edildiğini kontrol et.
+        # Her müşteri ya kamyonla ya da drone ile tam bir kez ziyaret edilmeli.
         truck_customers = list(truck_route[1:-1])
         drone_customers = [trip[1] for trip in drone_trips]
         served_customers = truck_customers + drone_customers
@@ -352,38 +351,23 @@ class HGVNS_Engine:
             if launch not in truck_route or return_node not in truck_route:
                 return float('inf')
 
-            # Depodan kalkış başlangıçtaki 0'dır.
-            if launch == 0:
-                launch_idx = 0
-            else:
-                launch_idx = truck_route.index(launch)
-
-            # Depoya dönüş rotanın sonundaki 0'dır.
-            if return_node == 0:
-                return_idx = len(truck_route) - 1
-            else:
-                return_idx = truck_route.index(return_node)
+            # 0 kalkış noktasıysa başlangıç deposu, dönüş noktasıysa son depodur.
+            launch_idx = 0 if launch == 0 else truck_route.index(launch)
+            return_idx = len(truck_route) - 1 if return_node == 0 else truck_route.index(return_node)
 
             if launch_idx >= return_idx:
                 return float('inf')
 
-            drone_time = (
-                self.d[launch][drone_node]
-                + self.d[drone_node][return_node]
-            )
+            drone_time = self.d[launch][drone_node] + self.d[drone_node][return_node]
 
             if drone_time > self.max_fly:
                 return float('inf')
 
-            trip_records.append(
-                (launch_idx, return_idx, drone_time)
-            )
+            trip_records.append((launch_idx, return_idx, drone_time))
 
-        # Uçuşları kamyon rotasındaki kalkış sırasına göre sırala.
         trip_records.sort(key=lambda record: record[0])
 
         # Tek drone aynı anda iki uçuş yapamaz.
-        # Bir uçuşun bittiği noktadan yenisinin başlamasına izin verilir.
         for idx in range(len(trip_records) - 1):
             current_return_idx = trip_records[idx][1]
             next_launch_idx = trip_records[idx + 1][0]
@@ -394,14 +378,10 @@ class HGVNS_Engine:
         trip_by_launch = {}
 
         for launch_idx, return_idx, drone_time in trip_records:
-            # Aynı noktadan aynı anda iki ayrı drone uçuşu başlatılamaz.
             if launch_idx in trip_by_launch:
                 return float('inf')
 
-            trip_by_launch[launch_idx] = (
-                return_idx,
-                drone_time
-            )
+            trip_by_launch[launch_idx] = (return_idx, drone_time)
 
         total_cost = 0.0
         route_idx = 0
@@ -409,28 +389,15 @@ class HGVNS_Engine:
         while route_idx < len(truck_route) - 1:
             if route_idx in trip_by_launch:
                 return_idx, drone_time = trip_by_launch[route_idx]
-
                 truck_time = 0.0
 
                 for edge_idx in range(route_idx, return_idx):
-                    truck_time += self.t[
-                        truck_route[edge_idx]
-                    ][
-                        truck_route[edge_idx + 1]
-                    ]
+                    truck_time += self.t[truck_route[edge_idx]][truck_route[edge_idx + 1]]
 
-                # Kamyon ve drone eş zamanlı hareket ettiği için
-                # segment süresi uzun olan aracın süresidir.
                 total_cost += max(truck_time, drone_time)
                 route_idx = return_idx
-
             else:
-                total_cost += self.t[
-                    truck_route[route_idx]
-                ][
-                    truck_route[route_idx + 1]
-                ]
-
+                total_cost += self.t[truck_route[route_idx]][truck_route[route_idx + 1]]
                 route_idx += 1
 
         return total_cost
