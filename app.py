@@ -54,13 +54,15 @@ class FSTSP_Parser:
             elif "The Depot" in line:
                 i += 1
                 parts = lines[i].strip().split()
-                self.nodes.append((0, float(parts[0]), float(parts[1]))) 
+                if len(parts) >= 2:
+                    self.nodes.append((0, float(parts[0]), float(parts[1])))
             elif "The Locations" in line:
                 i += 1
                 for j in range(1, self.num_nodes):
                     if i < len(lines):
                         parts = lines[i].strip().split()
-                        self.nodes.append((j, float(parts[0]), float(parts[1])))
+                        if len(parts) >= 2:
+                            self.nodes.append((j, float(parts[0]), float(parts[1])))
                         i += 1
                 break
             i += 1
@@ -268,8 +270,8 @@ class BRKGA_Engine:
         
         if log_console:
             sample_genes = [round(g, 3) for g in population[0]['route'][:6]]
-            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, [0, 1] arası Random Key genleriyle yaratıldı. (Örn 1. Birey: `{sample_genes}...`)")
-            log_console.write("⚙️ **Aşama 2 (Evrim & DP-Split):** Popülasyon elitizm ve çaprazlama (crossover) döngüsüne sokuluyor...")
+            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, [0, 1] arası Random Key genleriyle yaratıldı. (Örn: `{sample_genes}...`)")
+            log_console.write("⚙️ **Aşama 2 (Evrim & DP-Split):** Popülasyon elitizm ve çaprazlama döngüsüne sokuluyor...")
 
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
@@ -280,7 +282,7 @@ class BRKGA_Engine:
             if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
                 best_solution = population[0].copy()
                 if log_console and gen > 0:
-                    log_console.write(f"🔥 **Jenerasyon {gen}:** Yeni en iyimakespan skoru **{best_solution['fitness']:.2f}** olarak güncellendi!")
+                    log_console.write(f"🔥 **Jenerasyon {gen}:** Yeni optimum makespan skoru **{best_solution['fitness']:.2f}** bulundu!")
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -305,7 +307,7 @@ class BRKGA_Engine:
             if status_text: status_text.text(f"BRKGA Running... Gen {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
         if log_console:
-            log_console.write("✅ **Evrim Tamamlandı!** Nihai optimum rota seti ve makespan hesaplandı.")
+            log_console.write("✅ **Evrim Tamamlandı!** Nihai optimum rota seti hesaplandı.")
             
         return best_solution
 
@@ -410,14 +412,11 @@ class HGVNS_Engine:
                 if node in truck_nodes_needed: continue 
                 
                 prev_n, next_n = truck_route[j-1], truck_route[j+1]
-                
                 temp_t = truck_route.copy()
                 temp_t.pop(j)
                 temp_d = drone_trips + [(prev_n, node, next_n)]
                 
-                # Gerçek Global Maliyet Hesaplaması (Daha güvenli!)
                 c = self.evaluate_cost(temp_t, temp_d)
-                
                 if c < best_c:
                     best_c = c
                     best_move = (node, prev_n, next_n)
@@ -437,7 +436,6 @@ class HGVNS_Engine:
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # Makaledeki 5 kritik komşuluk (Özellikle 5 numara hayat kurtaracak)
         neighborhoods = [1, 2, 3, 4, 5] 
         random.shuffle(neighborhoods)
         
@@ -446,7 +444,7 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            if n_idx == 1: # 2-opt
+            if n_idx == 1: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
@@ -457,7 +455,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
                             
-            elif n_idx == 2: # Swap
+            elif n_idx == 2: 
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
@@ -469,7 +467,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 3: # Reinsert
+            elif n_idx == 3: 
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
                     temp_t = best_t[:i] + best_t[i+1:]
@@ -483,7 +481,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
             
-            elif n_idx == 4 and len(best_d) > 0: # Drone'dan Kamyona İade
+            elif n_idx == 4 and len(best_d) > 0: 
                 for i, trip in enumerate(best_d):
                     new_d = best_d[:i] + best_d[i+1:]
                     node = trip[1]
@@ -500,7 +498,7 @@ class HGVNS_Engine:
                         improved = True
                         break
 
-            elif n_idx == 5: # YENİ SİLAH: Kamyon'dan Drone'a Gönderim (Paper 4.8)
+            elif n_idx == 5: 
                 for i in range(1, len(best_t)-1):
                     drone_cand = best_t[i]
                     if drone_cand in self.novisit_list: continue
@@ -545,7 +543,7 @@ class HGVNS_Engine:
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        max_iters = 100  # Makine ısınsın diye 30'dan 100'e çıkardım
+        max_iters = 100
         k_max = 5
         k_shake = 1
         
@@ -553,15 +551,32 @@ class HGVNS_Engine:
             if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
             if status_text: status_text.text(f"HGVNS: Alg 3 & 4 (GVNS Search)... Iter: {iter_count+1}/{max_iters} | Score: {best_cost:.2f}")
             
+            # --- AKILLI SARSMA (Robust Shake) - INF TUZAĞINI BOZAN YER ---
             shaken_t, shaken_d = best_t.copy(), best_d.copy()
             for _ in range(k_shake):
-                if len(shaken_t) > 3:
-                    idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
-                    shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
+                if len(shaken_t) <= 3: break
+                
+                idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
+                node1, node2 = shaken_t[idx1], shaken_t[idx2]
+                
+                # Eğer sarsılan düğümler dron bağlantılıysa, inf vermesin diye o uçuşu kargoya iade et (Dissolve)
+                new_d = []
+                for trip in shaken_d:
+                    if trip[0] in (node1, node2) or trip[2] in (node1, node2):
+                        insert_idx = random.randint(1, len(shaken_t)-1)
+                        shaken_t.insert(insert_idx, trip[1])
+                    else:
+                        new_d.append(trip)
+                shaken_d = new_d
+                
+                # Indexler değişmiş olabilir, güncelleyip swap işlemini tamamla
+                i1, i2 = shaken_t.index(node1), shaken_t.index(node2)
+                shaken_t[i1], shaken_t[i2] = shaken_t[i2], shaken_t[i1]
             
+            # Arama Aşaması
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
-            if new_cost < best_cost:
+            if new_cost < best_cost - 1e-4:
                 best_cost = new_cost
                 best_t, best_d = new_t, new_d
                 k_shake = 1
@@ -678,7 +693,6 @@ else:
                     st.markdown("### 🟦 BRKGA (Memetic)")
                     pb_b, st_txt_b = st.progress(0), st.empty()
                     
-                    # Yerleşimi Düzelttik: Önce Harita Placeholder, Altında Canlı Loglar
                     metric_placeholder_b = st.empty()
                     map_placeholder_b = st.empty()
                     log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
@@ -717,7 +731,7 @@ else:
                 c_rep2.info(f"⏱️ **Computation Time**\n\nBRKGA: {time_b:.2f}s | HGVNS: {time_h:.2f}s")
                 c_rep3.info(f"🚁 **Drone Utilization**\n\nBRKGA: {len(sol_b['drone_trips'])} trips | HGVNS: {len(sol_h['drone_trips'])} trips")
                 
-                # --- ROUTE BREAKDOWNS (ALTA LİSTELENDİ) ---
+                # --- ROUTE BREAKDOWNS ---
                 st.write("---")
                 col_r1, col_r2 = st.columns(2)
                 with col_r1:
