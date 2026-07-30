@@ -713,7 +713,7 @@ else:
                     # Yerleşimi Düzelttik: Önce Harita Placeholder, Altında Canlı Loglar
                     metric_placeholder_b = st.empty()
                     map_placeholder_b = st.empty()
-                    log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=True)
+                    log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                     
                     start_time = time.time()
                     sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt, log_b)
@@ -773,7 +773,7 @@ else:
                 
                 metric_placeholder = st.empty()
                 map_placeholder = st.empty()
-                log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=True)
+                log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                 
                 start_time = time.time()
                 sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb, st_txt, use_2opt, use_3opt, log_b)
