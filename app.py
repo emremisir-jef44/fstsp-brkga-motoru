@@ -279,10 +279,29 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depot',
                              text=["DEPOT"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    fig.update_layout(title="🚁 FSTSP Optimum Route (O(N) DP & Numba JIT)", xaxis_title="X", yaxis_title="Y", hovermode="closest",
-                      plot_bgcolor='white', xaxis=dict(showgrid=True, gridcolor='lightgray'), yaxis=dict(showgrid=True, gridcolor='lightgray'))
+    # --- YENİ EKLENEN GÖRSEL DÜZENLEMELER BURADA ---
+    fig.update_layout(
+        title="🚁 FSTSP Optimum Route",
+        xaxis_title="X Coordinate",
+        yaxis_title="Y Coordinate",
+        hovermode="closest",
+        plot_bgcolor='#f8f9fa', # Daha şık durması için hafif gri/kırık beyaz arka plan
+        height=750,             # Haritaya sağlam bir dikey alan verdik
+        xaxis=dict(
+            showgrid=True, 
+            gridcolor='lightgray',
+            zeroline=False
+        ),
+        yaxis=dict(
+            showgrid=True, 
+            gridcolor='lightgray',
+            zeroline=False,
+            scaleanchor="x",    # İŞİN SIRRI: X ve Y ölçeğini 1:1 kilitler (Gerçek uzaklık algısı)
+            scaleratio=1
+        ),
+        margin=dict(l=40, r=40, t=60, b=40) # Kenar boşluklarını daraltıp haritayı büyüttük
+    )
     return fig
-
 # ==========================================
 # HELPER FUNCTION: NATURAL SORTING
 # ==========================================
