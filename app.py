@@ -263,15 +263,26 @@ class BRKGA_Engine:
         ind['truck_route'] = t_route
         ind['drone_trips'] = d_trips
 
-    def run(self, progress_bar, status_text, use_2opt, use_3opt):
+    def run(self, progress_bar, status_text, use_2opt, use_3opt, log_console=None):
         population = [self.create_individual() for _ in range(self.p)]
+        
+        # Juri/Görselleştirme için başlangıç logları
+        if log_console:
+            sample_genes = [round(g, 3) for g in population[0]['route'][:6]]
+            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, 0-1 arası (Random Key) kromozomlarla yaratıldı. (Örn 1. Birey: `{sample_genes}...`)")
+            log_console.write("⚙️ **Aşama 2 (Evrim):** DP-Split Decoder ve Turnuva Seçilimi başlıyor...")
+
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
 
         for gen in range(self.max_gen):
             population.sort(key=lambda x: x['fitness'])
+            
+            # Yeni en iyi bulunduğunda log bas
             if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
                 best_solution = population[0].copy()
+                if log_console and gen > 0:
+                    log_console.write(f"🔥 **Yeni Optimum (Gen {gen}):** Skor **{best_solution['fitness']:.2f}** seviyesine düştü!")
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -295,6 +306,9 @@ class BRKGA_Engine:
             if progress_bar: progress_bar.progress((gen + 1) / self.max_gen)
             if status_text: status_text.text(f"BRKGA Running... Gen {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
+        if log_console:
+            log_console.write("✅ **Evrim Tamamlandı!** Maksimum jenerasyona ulaşıldı.")
+            
         return best_solution
 
 # ==========================================
@@ -309,19 +323,16 @@ class HGVNS_Engine:
         self.novisit_list = parsed_data.novisit_list
 
     def evaluate_cost(self, truck_route, drone_trips):
-        # 1. Hata Engelleme: Kalkış ve inişler rotada mı? Kalkış, inişten önce mi?
         for trip in drone_trips:
             if trip[0] not in truck_route or trip[2] not in truck_route:
                 return float('inf')
             if truck_route.index(trip[0]) >= truck_route.index(trip[2]):
                 return float('inf')
-
         try:
             sorted_trips = sorted(drone_trips, key=lambda x: truck_route.index(x[0]))
         except ValueError:
             return float('inf')
 
-        # 2. Makale Kısıtları (Prohibition 1 & 2): İç içe veya çakışan uçuşlar yasak!
         for i in range(len(sorted_trips)-1):
             t1, t2 = sorted_trips[i], sorted_trips[i+1]
             idx_t1_ret = truck_route.index(t1[2])
@@ -332,7 +343,6 @@ class HGVNS_Engine:
         curr_trip_idx = 0
         i = 0
         
-        # 3. Denklem 1: Alt-rotaları hesaplama
         while i < len(truck_route) - 1:
             u = truck_route[i]
             
@@ -364,7 +374,6 @@ class HGVNS_Engine:
         return total_cost
 
     def _solve_tsp(self):
-        # Aşama 1: En Yakın Komşu
         unvisited = list(range(1, self.num_nodes))
         route = [0]
         curr = 0
@@ -375,7 +384,6 @@ class HGVNS_Engine:
             curr = next_node
         route.append(0)
         
-        # Aşama 2: Concorde Kalitesini Yakalamak İçin 2-Opt TSP Temizliği
         improved = True
         while improved:
             improved = False
@@ -435,7 +443,6 @@ class HGVNS_Engine:
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # Makaledeki 4 dev komşuluk yapısı (2-opt, Swap, Reinsert, Relocate)
         neighborhoods = [1, 2, 3, 4] 
         random.shuffle(neighborhoods)
         
@@ -444,7 +451,7 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            if n_idx == 1: # 2-opt
+            if n_idx == 1: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
@@ -455,7 +462,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
                             
-            elif n_idx == 2: # Exchange (Swap)
+            elif n_idx == 2: 
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
@@ -467,7 +474,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 3: # Reinsertion
+            elif n_idx == 3: 
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
                     temp_t = best_t[:i] + best_t[i+1:]
@@ -481,7 +488,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
             
-            elif n_idx == 4 and len(best_d) > 0: # Dron'dan Kamyona İade (Reverse Relocate)
+            elif n_idx == 4 and len(best_d) > 0: 
                 for i, trip in enumerate(best_d):
                     new_d = best_d[:i] + best_d[i+1:]
                     node = trip[1]
@@ -511,7 +518,6 @@ class HGVNS_Engine:
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # Makalenin Kalbi: GVNS Shaking ve RVND Döngüsü (Tam 30 Tur!)
         max_iters = 30
         k_max = 5
         k_shake = 1
@@ -520,17 +526,14 @@ class HGVNS_Engine:
             if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
             if status_text: status_text.text(f"HGVNS: Alg 3 & 4 (GVNS Search)... Iter: {iter_count+1}/{max_iters} | Score: {best_cost:.2f}")
             
-            # Sarsma (Shake)
             shaken_t, shaken_d = best_t.copy(), best_d.copy()
             for _ in range(k_shake):
                 if len(shaken_t) > 3:
                     idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
                     shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
             
-            # Arama (RVND)
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
-            # İyileşme varsa kabul et ve sarsmayı sıfırla
             if new_cost < best_cost:
                 best_cost = new_cost
                 best_t, best_d = new_t, new_d
@@ -637,13 +640,77 @@ else:
         if st.button("🚀 START OPTIMIZATION", type="primary"):
             st.divider()
             
-            if solver_type == "BRKGA (Memetic)":
+            # ---------------------------------------------------------
+            # BENCHMARK ARENA: HEAD-TO-HEAD
+            # ---------------------------------------------------------
+            if solver_type == "Benchmark (Run Both)":
+                st.subheader("⚔️ Benchmark Arena: Head-to-Head")
+                col_b, col_h = st.columns(2)
+                
+                with col_b:
+                    st.markdown("### 🟦 BRKGA (Memetic)")
+                    pb_b, st_txt_b = st.progress(0), st.empty()
+                    log_b = st.expander("🔍 Inside the BRKGA Brain (Live Logs)", expanded=True)
+                    
+                    start_time = time.time()
+                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt, log_b)
+                    time_b = time.time() - start_time
+                    
+                    st.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
+                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
+                    
+                with col_h:
+                    st.markdown("### 🟥 HGVNS (Paper Replica)")
+                    pb_h, st_txt_h = st.progress(0), st.empty()
+                    
+                    start_time = time.time()
+                    sol_h = HGVNS_Engine(parsed_data).run(pb_h, st_txt_h)
+                    time_h = time.time() - start_time
+                    
+                    st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
+                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_h['truck_route'], sol_h['drone_trips'], "HGVNS"), use_container_width=True)
+                
+                # --- DETAILED BENCHMARK REPORT ---
+                st.divider()
+                st.subheader("📊 Detailed Benchmark Report")
+                
+                gap_val = sol_h['fitness'] - sol_b['fitness']
+                gap_pct = (gap_val / sol_h['fitness']) * 100 if sol_h['fitness'] > 0 else 0
+                
+                c_rep1, c_rep2, c_rep3 = st.columns(3)
+                if gap_val > 0:
+                    c_rep1.success(f"🏆 **Winner: BRKGA**\n\nOutperformed HGVNS by **{gap_pct:.2f}%**")
+                else:
+                    c_rep1.error(f"🏆 **Winner: HGVNS**\n\nOutperformed BRKGA by **{abs(gap_pct):.2f}%**")
+                    
+                c_rep2.info(f"⏱️ **Computation Time**\n\nBRKGA: {time_b:.2f}s | HGVNS: {time_h:.2f}s")
+                c_rep3.info(f"🚁 **Drone Utilization**\n\nBRKGA: {len(sol_b['drone_trips'])} trips | HGVNS: {len(sol_h['drone_trips'])} trips")
+                
+                # --- ROUTE BREAKDOWNS ---
+                st.write("---")
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    st.markdown("#### 🟦 BRKGA Routes")
+                    st.caption("**Truck Route:** " + " ➔ ".join(map(str, sol_b['truck_route'])))
+                    for i, t_trip in enumerate(sol_b['drone_trips']):
+                        st.caption(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
+                        
+                with col_r2:
+                    st.markdown("#### 🟥 HGVNS Routes")
+                    st.caption("**Truck Route:** " + " ➔ ".join(map(str, sol_h['truck_route'])))
+                    for i, t_trip in enumerate(sol_h['drone_trips']):
+                        st.caption(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
+
+            # ---------------------------------------------------------
+            # SINGLE RUN: BRKGA
+            # ---------------------------------------------------------
+            elif solver_type == "BRKGA (Memetic)":
                 st.subheader("🟦 BRKGA Engine Results")
                 pb, st_txt = st.progress(0), st.empty()
-                decoder = DPSplitDecoder(parsed_data)
-                engine = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, decoder)
+                log_b = st.expander("🔍 Inside the BRKGA Brain (Live Logs)", expanded=True)
+                
                 start_time = time.time()
-                sol = engine.run(pb, st_txt, use_2opt, use_3opt)
+                sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb, st_txt, use_2opt, use_3opt, log_b)
                 elapsed = time.time() - start_time
                 
                 c1, c2, c3 = st.columns(3)
@@ -651,13 +718,21 @@ else:
                 c2.metric("Time", f"{elapsed:.2f} s")
                 c3.metric("Drone Trips", len(sol['drone_trips']))
                 st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
+                
+                st.markdown("#### 📝 Route Details")
+                st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
+                for i, t_trip in enumerate(sol['drone_trips']):
+                    st.write(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
 
+            # ---------------------------------------------------------
+            # SINGLE RUN: HGVNS
+            # ---------------------------------------------------------
             elif solver_type == "HGVNS (Paper Replica)":
                 st.subheader("🟥 HGVNS Engine Results")
                 pb, st_txt = st.progress(0), st.empty()
-                engine = HGVNS_Engine(parsed_data)
+                
                 start_time = time.time()
-                sol = engine.run(pb, st_txt)
+                sol = HGVNS_Engine(parsed_data).run(pb, st_txt)
                 elapsed = time.time() - start_time
                 
                 c1, c2, c3 = st.columns(3)
@@ -665,29 +740,8 @@ else:
                 c2.metric("Time", f"{elapsed:.2f} s")
                 c3.metric("Drone Trips", len(sol['drone_trips']))
                 st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "HGVNS"), use_container_width=True)
-
-            else:
-                st.subheader("⚔️ Benchmark Arena: Head-to-Head")
-                col_b, col_h = st.columns(2)
                 
-                with col_b:
-                    st.markdown("### 🟦 BRKGA (Memetic)")
-                    pb_b, st_txt_b = st.progress(0), st.empty()
-                    start_time = time.time()
-                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt)
-                    time_b = time.time() - start_time
-                    st.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
-                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
-                    
-                with col_h:
-                    st.markdown("### 🟥 HGVNS (Paper Replica)")
-                    pb_h, st_txt_h = st.progress(0), st.empty()
-                    start_time = time.time()
-                    sol_h = HGVNS_Engine(parsed_data).run(pb_h, st_txt_h)
-                    time_h = time.time() - start_time
-                    
-                    diff = sol_h['fitness'] - sol_b['fitness']
-                    st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
-                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_h['truck_route'], sol_h['drone_trips'], "HGVNS"), use_container_width=True)
-                    
-                st.success(f"🏆 **Winner:** {'BRKGA' if sol_b['fitness'] < sol_h['fitness'] else 'HGVNS'} by a margin of {abs(diff):.2f} units!")
+                st.markdown("#### 📝 Route Details")
+                st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
+                for i, t_trip in enumerate(sol['drone_trips']):
+                    st.write(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
