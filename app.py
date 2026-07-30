@@ -312,8 +312,98 @@ class BRKGA_Engine:
         return best_solution
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (DYNAMIC PAPER REPLICA)
+# 3. MODULE: HGVNS ENGINE (PAPER REPLICA WITH NUMBA)
 # ==========================================
+@njit
+def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, num_nodes, max_fly):
+    """
+    Paper kısıtlarını IŞIK HIZINDA kontrol eden C++ derlemeli fonksiyon.
+    Her müşteri 1 kez ziyaret edilmeli, çakışma olmamalı, C_q = max(Truck, Drone).
+    """
+    num_t = len(truck_route)
+    num_d = len(drone_trips_arr)
+
+    if (num_t - 2 + num_d) != (num_nodes - 1):
+        return np.inf
+
+    visited = np.zeros(num_nodes, dtype=np.bool_)
+    for i in range(1, num_t - 1):
+        if visited[truck_route[i]]: return np.inf
+        visited[truck_route[i]] = True
+
+    for i in range(num_d):
+        visit = int(drone_trips_arr[i, 1])
+        if visited[visit]: return np.inf
+        visited[visit] = True
+
+    idx_map = np.full(num_nodes, -1, dtype=np.int32)
+    for i in range(num_t):
+        node = truck_route[i]
+        if node != 0:
+            idx_map[node] = i
+    idx_map[0] = 0 
+
+    if num_d == 0:
+        cost = 0.0
+        for i in range(num_t - 1):
+            cost += t_matrix[truck_route[i], truck_route[i+1]]
+        return cost
+
+    trip_records = np.zeros((num_d, 3), dtype=np.float64)
+    for i in range(num_d):
+        l = int(drone_trips_arr[i, 0])
+        d_node = int(drone_trips_arr[i, 1])
+        r = int(drone_trips_arr[i, 2])
+
+        l_idx = 0 if l == 0 else idx_map[l]
+        r_idx = num_t - 1 if r == 0 else idx_map[r]
+
+        if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
+            return np.inf
+
+        d_time = d_matrix[l, d_node] + d_matrix[d_node, r]
+        if d_time > max_fly: return np.inf
+
+        trip_records[i, 0] = float(l_idx)
+        trip_records[i, 1] = float(r_idx)
+        trip_records[i, 2] = d_time
+
+    sort_idx = np.argsort(trip_records[:, 0])
+    trip_records = trip_records[sort_idx]
+
+    # Drone operasyonları çakışamaz kısıtı (Prohibition 1 & 2)
+    for i in range(num_d - 1):
+        if trip_records[i+1, 0] < trip_records[i, 1]:
+            return np.inf
+
+    total_cost = 0.0
+    route_idx = 0
+    trip_idx = 0
+
+    while route_idx < num_t - 1:
+        if trip_idx < num_d and trip_records[trip_idx, 0] == route_idx:
+            return_idx = int(trip_records[trip_idx, 1])
+            drone_time = trip_records[trip_idx, 2]
+
+            truck_time = 0.0
+            for k in range(route_idx, return_idx):
+                truck_time += t_matrix[truck_route[k], truck_route[k+1]]
+
+            # C_q = max(T_truck, T_drone) formülü
+            if truck_time > drone_time:
+                total_cost += truck_time
+            else:
+                total_cost += drone_time
+
+            route_idx = return_idx
+            trip_idx += 1
+        else:
+            total_cost += t_matrix[truck_route[route_idx], truck_route[route_idx+1]]
+            route_idx += 1
+
+    return total_cost
+
+
 class HGVNS_Engine:
     def __init__(self, parsed_data, custom_tsp=None):
         self.t = parsed_data.truck_time_matrix
@@ -322,113 +412,14 @@ class HGVNS_Engine:
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
         self.custom_tsp = custom_tsp
-        self.eval_memo = {} 
-
-    def _repair_solution(self, t_route, d_trips):
-        """
-        ZİNCİRLERİ KIRAN FONKSİYON: 
-        Eğer kamyon rotası değiştiğinde bir dron uçuşu kural dışı kalırsa (çakışma, geriye uçuş vs.),
-        dronu anında kamyon rotasına "güvenli bir durak" olarak iade eder. 
-        Böylece kamyon özgürce değişebilir ve yeni dron senaryoları doğar!
-        """
-        truck_nodes = t_route.copy()
-        
-        while True:
-            invalid_found = False
-            # Dronları kamyondaki kalkış sırasına göre diz
-            d_trips.sort(key=lambda x: 0 if x[0] == 0 else (truck_nodes.index(x[0]) if x[0] in truck_nodes else 999))
-            
-            last_ret_idx = -1
-            valid_trips = []
-            
-            for trip in d_trips:
-                l, d_node, r = trip
-                l_idx = 0 if l == 0 else (truck_nodes.index(l) if l in truck_nodes else -1)
-                r_idx = len(truck_nodes)-1 if r == 0 else (truck_nodes.index(r) if r in truck_nodes else -1)
-                
-                d_time = self.d[l][d_node] + self.d[d_node][r]
-                
-                # Kurallar: Uçuş yönü doğru mu? Batarya yetiyor mu? Çakışma var mı?
-                is_valid = (l_idx != -1 and r_idx != -1 and l_idx < r_idx and d_time <= self.max_fly and l_idx >= last_ret_idx)
-                
-                if is_valid:
-                    valid_trips.append(trip)
-                    last_ret_idx = r_idx
-                else:
-                    # Kural dışı! Dronu iptal et, kargoyu kamyona güvenli yere ekle
-                    insert_idx = l_idx + 1 if l_idx != -1 else 1
-                    truck_nodes.insert(insert_idx, d_node)
-                    invalid_found = True
-                    break # İndeksler değiştiği için döngüyü kır, baştan kontrol et
-            
-            if invalid_found:
-                # İptal edilen uçuşu listeden kalıcı olarak sil
-                d_trips = [t for t in d_trips if t != trip]
-            else:
-                break
-                
-        return truck_nodes, valid_trips
 
     def evaluate_cost(self, truck_route, drone_trips):
-        if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
-            return float('inf')
-
-        state_key = (tuple(truck_route), frozenset(drone_trips))
-        if state_key in self.eval_memo:
-            return self.eval_memo[state_key]
-
+        t_arr = np.array(truck_route, dtype=np.int32)
         if not drone_trips:
-            cost = 0.0
-            for i in range(len(truck_route)-1):
-                cost += self.t[truck_route[i]][truck_route[i+1]]
-            self.eval_memo[state_key] = cost
-            return cost
-
-        idx_map = {node: i for i, node in enumerate(truck_route)}
-        idx_map[0] = 0 
-        
-        trip_records = []
-        for launch, d_node, ret in drone_trips:
-            l_idx = idx_map.get(launch, -1)
-            r_idx = len(truck_route)-1 if ret == 0 else idx_map.get(ret, -1)
-
-            if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
-                return float('inf')
-
-            d_time = self.d[launch][d_node] + self.d[d_node][ret]
-            if d_time > self.max_fly:
-                return float('inf')
-
-            trip_records.append((l_idx, r_idx, d_time))
-
-        trip_records.sort(key=lambda r: r[0])
-
-        for idx in range(len(trip_records) - 1):
-            if trip_records[idx+1][0] < trip_records[idx][1]:
-                return float('inf')
-
-        total_cost = 0.0
-        route_idx = 0
-        trip_idx = 0
-        
-        while route_idx < len(truck_route) - 1:
-            if trip_idx < len(trip_records) and trip_records[trip_idx][0] == route_idx:
-                return_idx = trip_records[trip_idx][1]
-                drone_time = trip_records[trip_idx][2]
-                
-                truck_time = 0.0
-                for k in range(route_idx, return_idx):
-                    truck_time += self.t[truck_route[k]][truck_route[k+1]]
-                    
-                total_cost += truck_time if truck_time > drone_time else drone_time
-                route_idx = return_idx
-                trip_idx += 1
-            else:
-                total_cost += self.t[truck_route[route_idx]][truck_route[route_idx+1]]
-                route_idx += 1
-                
-        self.eval_memo[state_key] = total_cost
-        return total_cost
+            d_arr = np.zeros((0, 3), dtype=np.int32)
+        else:
+            d_arr = np.array(drone_trips, dtype=np.int32)
+        return numba_evaluate_hgvns_cost(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
 
     def _solve_tsp(self):
         if self.custom_tsp and len(self.custom_tsp) > 2:
@@ -472,8 +463,7 @@ class HGVNS_Engine:
                 if node in truck_nodes_needed: continue 
                 
                 prev_n, next_n = truck_route[j-1], truck_route[j+1]
-                temp_t = truck_route.copy()
-                temp_t.pop(j)
+                temp_t = truck_route[:j] + truck_route[j+1:]
                 
                 drone_trips.append((prev_n, node, next_n))
                 c = self.evaluate_cost(temp_t, drone_trips)
@@ -491,17 +481,14 @@ class HGVNS_Engine:
                 truck_nodes_needed.add(next_n)
                 improved = True
                 
-        try:
-            drone_trips.sort(key=lambda x: truck_route.index(x[0]))
-        except ValueError:
-            pass
         return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        neighborhoods = [1, 2, 3, 4, 5, 6] 
+        # PAPER REPLICA: Tam olarak 7 komşuluk yapısı kullanıldı.
+        neighborhoods = [1, 2, 3, 4, 5, 6, 7] 
         random.shuffle(neighborhoods)
         
         k = 0
@@ -509,137 +496,142 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            if n_idx == 1: 
-                for i in range(1, len(best_t)-2):
-                    for j in range(i+1, len(best_t)-1):
-                        new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
-                        rep_t, rep_d = self._repair_solution(new_t, best_d)
-                        c = self.evaluate_cost(rep_t, rep_d)
+            if n_idx == 1: # Reinsertion (Kamyon durak kaydırma)
+                for i in range(1, len(best_t)-1):
+                    for j in range(1, len(best_t)):
+                        if i == j or i == j-1: continue
+                        new_t = best_t.copy()
+                        node = new_t.pop(i)
+                        new_t.insert(j if j < i else j-1, node)
+                        c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost:
-                            best_cost, best_t, best_d = c, rep_t, rep_d
+                            best_cost, best_t = c, new_t
                             improved = True
                             break
                     if improved: break
                             
-            elif n_idx == 2: 
+            elif n_idx == 2: # Or-opt2 (Kamyon 2 komşu durak kaydırma)
+                for i in range(1, len(best_t)-2):
+                    for j in range(1, len(best_t)):
+                        if j in [i, i+1, i+2]: continue
+                        new_t = best_t.copy()
+                        n1 = new_t.pop(i)
+                        n2 = new_t.pop(i)
+                        insert_idx = j if j < i else j-2
+                        new_t.insert(insert_idx, n2)
+                        new_t.insert(insert_idx, n1)
+                        c = self.evaluate_cost(new_t, best_d)
+                        if c < best_cost:
+                            best_cost, best_t = c, new_t
+                            improved = True
+                            break
+                    if improved: break
+
+            elif n_idx == 3: # Exchange (1,1) (Kamyon 1-1 takas)
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
                         new_t[i], new_t[j] = new_t[j], new_t[i]
-                        rep_t, rep_d = self._repair_solution(new_t, best_d)
-                        c = self.evaluate_cost(rep_t, rep_d)
+                        c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost:
-                            best_cost, best_t, best_d = c, rep_t, rep_d
+                            best_cost, best_t = c, new_t
                             improved = True
                             break
                     if improved: break
 
-            elif n_idx == 3: 
+            elif n_idx == 4: # Exchange (2,1) (Kamyon 2-1 takas)
+                for i in range(1, len(best_t)-2):
+                    for j in range(1, len(best_t)-1):
+                        if j == i or j == i+1: continue
+                        new_t = best_t.copy()
+                        if i < j:
+                            n_j = new_t.pop(j)
+                            n_i1 = new_t.pop(i)
+                            n_i2 = new_t.pop(i)
+                            new_t.insert(i, n_j)
+                            new_t.insert(j-1, n_i2)
+                            new_t.insert(j-1, n_i1)
+                        else:
+                            n_i1 = new_t.pop(i)
+                            n_i2 = new_t.pop(i)
+                            n_j = new_t.pop(j)
+                            new_t.insert(j, n_i2)
+                            new_t.insert(j, n_i1)
+                            new_t.insert(i+1, n_j)
+                        c = self.evaluate_cost(new_t, best_d)
+                        if c < best_cost:
+                            best_cost, best_t = c, new_t
+                            improved = True
+                            break
+                    if improved: break
+
+            elif n_idx == 5: # Exchange (2,2) (Kamyon 2-2 takas)
+                for i in range(1, len(best_t)-2):
+                    for j in range(i+2, len(best_t)-2):
+                        new_t = best_t.copy()
+                        new_t[i:i+2], new_t[j:j+2] = new_t[j:j+2], new_t[i:i+2]
+                        c = self.evaluate_cost(new_t, best_d)
+                        if c < best_cost:
+                            best_cost, best_t = c, new_t
+                            improved = True
+                            break
+                    if improved: break
+
+            elif n_idx == 6: # 2-opt (Kamyon segment tersine çevirme)
+                for i in range(1, len(best_t)-2):
+                    for j in range(i+1, len(best_t)-1):
+                        new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
+                        c = self.evaluate_cost(new_t, best_d)
+                        if c < best_cost:
+                            best_cost, best_t = c, new_t
+                            improved = True
+                            break
+                    if improved: break
+
+            elif n_idx == 7: # Relocate customer (Müşteri atamasını değiştirme: Kamyon <-> Dron)
+                # Alt Hamle 1: Kamyondan -> Drona geçir
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
+                    if node in self.novisit_list: continue
                     temp_t = best_t[:i] + best_t[i+1:]
-                    for j in range(1, len(temp_t)):
-                        if i == j: continue
-                        new_t = temp_t[:j] + [node] + temp_t[j:]
-                        rep_t, rep_d = self._repair_solution(new_t, best_d)
-                        c = self.evaluate_cost(rep_t, rep_d)
-                        if c < best_cost:
-                            best_cost, best_t, best_d = c, rep_t, rep_d
+                    best_insert_c = float('inf')
+                    best_insert_d = best_d
+                    for l_idx in range(len(temp_t)-1):
+                        limit = min(l_idx + 15, len(temp_t))
+                        for r_idx in range(l_idx+1, limit):
+                            l_cand, r_cand = temp_t[l_idx], temp_t[r_idx]
+                            if self.d[l_cand][node] + self.d[node][r_cand] > self.max_fly: continue
+                            cand_d = best_d.copy()
+                            cand_d.append((l_cand, node, r_cand))
+                            c = self.evaluate_cost(temp_t, cand_d)
+                            if c < best_insert_c:
+                                best_insert_c = c
+                                best_insert_d = cand_d
+                    if best_insert_c < best_cost:
+                        best_cost, best_t, best_d = best_insert_c, temp_t, best_insert_d
+                        improved = True
+                        break
+                if improved: 
+                    k = 0
+                    continue
+
+                # Alt Hamle 2: Drondan -> Kamyona geçir
+                if len(best_d) > 0:
+                    for i, trip in enumerate(best_d):
+                        temp_d = best_d[:i] + best_d[i+1:]
+                        node = trip[1]
+                        best_insert_c = float('inf')
+                        best_insert_t = best_t
+                        for j in range(1, len(best_t)):
+                            new_t = best_t[:j] + [node] + best_t[j:]
+                            c = self.evaluate_cost(new_t, temp_d)
+                            if c < best_insert_c:
+                                best_insert_c = c
+                                best_insert_t = new_t
+                        if best_insert_c < best_cost:
+                            best_cost, best_t, best_d = best_insert_c, best_insert_t, temp_d
                             improved = True
                             break
-                    if improved: break
-            
-            elif n_idx == 4 and len(best_d) > 0: 
-                for i, trip in enumerate(best_d):
-                    new_d = best_d[:i] + best_d[i+1:]
-                    node = trip[1]
-                    best_insert_c = float('inf')
-                    best_insert_t = best_t
-                    best_insert_d = new_d
-                    for j in range(1, len(best_t)):
-                        new_t = best_t[:j] + [node] + best_t[j:]
-                        rep_t, rep_d = self._repair_solution(new_t, new_d)
-                        c = self.evaluate_cost(rep_t, rep_d)
-                        if c < best_insert_c:
-                            best_insert_c = c
-                            best_insert_t = rep_t
-                            best_insert_d = rep_d
-                    
-                    if best_insert_c < best_cost:
-                        best_cost, best_t, best_d = best_insert_c, best_insert_t, best_insert_d
-                        improved = True
-                        break
-
-            elif n_idx == 5: 
-                for i in range(1, len(best_t)-1):
-                    drone_cand = best_t[i]
-                    if drone_cand in self.novisit_list: continue
-                    
-                    temp_t = best_t[:i] + best_t[i+1:]
-                    best_insert_c = float('inf')
-                    best_insert_t = best_t
-                    best_insert_d = best_d
-                    
-                    for launch_idx in range(len(temp_t) - 1):
-                        limit = min(launch_idx + 10, len(temp_t))
-                        for ret_idx in range(launch_idx + 1, limit):
-                            launch_node = temp_t[launch_idx]
-                            ret_node = temp_t[ret_idx]
-                            
-                            d_time = self.d[launch_node][drone_cand] + self.d[drone_cand][ret_node]
-                            if d_time > self.max_fly: continue
-                            
-                            cand_d = best_d.copy()
-                            cand_d.append((launch_node, drone_cand, ret_node))
-                            rep_t, rep_d = self._repair_solution(temp_t, cand_d)
-                            
-                            c = self.evaluate_cost(rep_t, rep_d)
-                            if c < best_insert_c:
-                                best_insert_c = c
-                                best_insert_t = rep_t
-                                best_insert_d = rep_d
-                                
-                    if best_insert_c < best_cost:
-                        best_cost = best_insert_c
-                        best_t = best_insert_t
-                        best_d = best_insert_d
-                        improved = True
-                        break
-
-            elif n_idx == 6 and len(best_d) > 0: 
-                for i, trip in enumerate(best_d):
-                    temp_d = best_d[:i] + best_d[i+1:]
-                    visit_node = trip[1]
-                    
-                    best_insert_c = float('inf')
-                    best_insert_t = best_t
-                    best_insert_d = best_d
-                    
-                    for l_idx in range(len(best_t) - 1):
-                        limit = min(l_idx + 10, len(best_t))
-                        for r_idx in range(l_idx + 1, limit):
-                            l_cand = best_t[l_idx]
-                            r_cand = best_t[r_idx]
-                            
-                            d_time = self.d[l_cand][visit_node] + self.d[visit_node][r_cand]
-                            if d_time > self.max_fly: continue
-                            
-                            cand_d = temp_d.copy()
-                            cand_d.append((l_cand, visit_node, r_cand))
-                            rep_t, rep_d = self._repair_solution(best_t, cand_d)
-                            
-                            c = self.evaluate_cost(rep_t, rep_d)
-                            if c < best_insert_c:
-                                best_insert_c = c
-                                best_insert_t = rep_t
-                                best_insert_d = rep_d
-                                
-                    if best_insert_c < best_cost:
-                        best_cost = best_insert_c
-                        best_t = best_insert_t
-                        best_d = best_insert_d
-                        improved = True
-                        break
 
             if improved:
                 random.shuffle(neighborhoods)
@@ -650,8 +642,6 @@ class HGVNS_Engine:
         return best_t, best_d, best_cost
 
     def run(self, progress_bar, status_text):
-        self.eval_memo.clear() 
-        
         if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde Initial & Global Savings)...")
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
@@ -668,11 +658,9 @@ class HGVNS_Engine:
             shaken_t, shaken_d = best_t.copy(), best_d.copy()
             for _ in range(k_shake):
                 if len(shaken_t) <= 3: break
-                
                 idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
                 shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
             
-            shaken_t, shaken_d = self._repair_solution(shaken_t, shaken_d)
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
             if new_cost < best_cost - 1e-4:
@@ -686,12 +674,9 @@ class HGVNS_Engine:
                 if k_shake > k_max:
                     k_shake = 1
                     
-            if no_improve_count >= 20:
+            if no_improve_count >= 15:
                 if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma (Early Stopping) devreye girdi.")
                 break
-                
-            if len(self.eval_memo) > 50000:
-                self.eval_memo.clear()
         
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
@@ -796,7 +781,7 @@ else:
         # OTOMATİK TSP DOSYASI OKUMA (Parser) - "datasets/solutions" Klasöründen!
         if use_custom_tsp:
             base_name = os.path.splitext(selected_file)[0]
-            sol_folder = os.path.join("datasets", "solutions") # Klasör yolunu senin yaptığın gibi güncelledim!
+            sol_folder = os.path.join("datasets", "solutions")
             tsp_path = None
             
             if os.path.exists(sol_folder):
