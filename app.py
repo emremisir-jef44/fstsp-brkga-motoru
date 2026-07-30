@@ -80,7 +80,66 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODULE: NUMBA JIT SUPPORTED LIGHTNING FAST DECODER
+# 2. MODULE: FAST LOCAL SEARCH (2-OPT & 3-OPT)
+# ==========================================
+@njit
+def fast_2opt(route, t_matrix):
+    """Reverses segments to untangle crossed routes"""
+    n = len(route)
+    improved = True
+    best_route = route.copy()
+    while improved:
+        improved = False
+        for i in range(1, n - 2):
+            for j in range(i + 1, n - 1):
+                d1 = t_matrix[best_route[i-1], best_route[i]] + t_matrix[best_route[j], best_route[j+1]]
+                d2 = t_matrix[best_route[i-1], best_route[j]] + t_matrix[best_route[i], best_route[j+1]]
+                if d2 < d1 - 1e-6:
+                    best_route[i:j+1] = best_route[i:j+1][::-1]
+                    improved = True
+    return best_route
+
+@njit
+def fast_3opt_relocation(route, t_matrix):
+    """Relocates a single node (breaks 3 edges) for deep neighborhood search"""
+    n = len(route)
+    improved = True
+    best_route = route.copy()
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(1, n - 1):
+                if i == j or i == j - 1:
+                    continue
+                prev_i = best_route[i-1]
+                node_i = best_route[i]
+                next_i = best_route[i+1]
+                
+                node_j = best_route[j]
+                next_j = best_route[j+1]
+                
+                d_old = t_matrix[prev_i, node_i] + t_matrix[node_i, next_i] + t_matrix[node_j, next_j]
+                d_new = t_matrix[prev_i, next_i] + t_matrix[node_j, node_i] + t_matrix[node_i, next_j]
+                
+                if d_new < d_old - 1e-6:
+                    new_route = np.zeros_like(best_route)
+                    idx = 0
+                    for k in range(n):
+                        if k == i: continue
+                        new_route[idx] = best_route[k]
+                        idx += 1
+                        if k == j:
+                            new_route[idx] = node_i
+                            idx += 1
+                    best_route = new_route
+                    improved = True
+                    break 
+            if improved:
+                break
+    return best_route
+
+# ==========================================
+# 3. MODULE: NUMBA JIT SUPPORTED LIGHTNING FAST DECODER
 # ==========================================
 @njit
 def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly):
@@ -149,7 +208,6 @@ class DPSplitDecoder:
         self.num_nodes = parsed_data.num_nodes
         self.max_fly = parsed_data.max_fly
         
-        # Boolean array for Numba JIT compiler
         self.novisit_mask = np.zeros(self.num_nodes, dtype=np.bool_)
         for nv in parsed_data.novisit_list:
             self.novisit_mask[nv] = True
@@ -189,7 +247,7 @@ class DPSplitDecoder:
         return cost, truck_route, drone_trips
 
 # ==========================================
-# 3. MODULE: BRKGA EVOLUTION ENGINE
+# 4. MODULE: BRKGA MEMETIC EVOLUTION ENGINE
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -206,16 +264,56 @@ class BRKGA_Engine:
             'route': [random.random() for _ in range(self.num_cust)],
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
+        
+    def create_smart_mutant(self, elites):
+        parent = random.choice(elites)
+        mutant_route = parent['route'].copy()
+        num_swaps = max(1, int(self.num_cust * 0.10))
+        for _ in range(num_swaps):
+            idx1, idx2 = random.sample(range(self.num_cust), 2)
+            mutant_route[idx1], mutant_route[idx2] = mutant_route[idx2], mutant_route[idx1]
+        return {
+            'route': mutant_route,
+            'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
+        }
 
-    def evaluate(self, ind):
+    def evaluate(self, ind, use_2opt, use_3opt):
+        rk_route = np.array(ind['route'])
+        
+        # LAMARCKIAN EVOLUTION: Apply Local Search and write back to genes
+        if use_2opt or use_3opt:
+            customers = np.arange(1, self.num_cust + 1)
+            sorted_indices = np.argsort(rk_route)
+            seq = customers[sorted_indices]
+            
+            full_seq = np.zeros(len(seq) + 2, dtype=np.int32)
+            full_seq[1:-1] = seq
+            
+            # Apply Numba Optimized Local Searches
+            if use_2opt:
+                full_seq = fast_2opt(full_seq, self.decoder.t)
+            if use_3opt:
+                full_seq = fast_3opt_relocation(full_seq, self.decoder.t)
+                
+            # Convert optimized sequence back to BRKGA random keys
+            new_seq = full_seq[1:-1]
+            new_rk = np.zeros(len(new_seq))
+            spacing = 1.0 / (len(new_seq) + 1)
+            for i, cust in enumerate(new_seq):
+                orig_idx = cust - 1 
+                new_rk[orig_idx] = (i + 1) * spacing
+                
+            ind['route'] = new_rk.tolist()
+
+        # Pass final genes to DP-Split Decoder
         cost, t_route, d_trips = self.decoder.decode(ind['route'])
         ind['fitness'] = cost
         ind['truck_route'] = t_route
         ind['drone_trips'] = d_trips
 
-    def run(self, progress_bar, status_text):
+    def run(self, progress_bar, status_text, use_2opt, use_3opt):
         population = [self.create_individual() for _ in range(self.p)]
-        for ind in population: self.evaluate(ind)
+        for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         
         best_solution = None
 
@@ -229,8 +327,16 @@ class BRKGA_Engine:
             non_elites = population[self.p_e:]
             next_gen.extend(elites)
             
-            mutants = [self.create_individual() for _ in range(self.p_m)]
-            for mut in mutants: self.evaluate(mut)
+            mutants = []
+            for _ in range(self.p_m):
+                if random.random() < 0.5:
+                    new_mut = self.create_smart_mutant(elites)
+                else:
+                    new_mut = self.create_individual()
+                    
+                self.evaluate(new_mut, use_2opt, use_3opt)
+                mutants.append(new_mut)
+                
             next_gen.extend(mutants)
             
             num_offspring = self.p - self.p_e - self.p_m
@@ -242,22 +348,22 @@ class BRKGA_Engine:
                 for i in range(self.num_cust):
                     child['route'].append(parent_a['route'][i] if random.random() < self.rho_e else parent_b['route'][i])
                 
-                self.evaluate(child)
+                self.evaluate(child, use_2opt, use_3opt)
                 next_gen.append(child)
                 
             population = next_gen
             
-            # Updating progress text every 10 generations since Numba processes hundreds per second
             if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                status_text.text(f"🔥 Numba JIT Compiler Active... Generation {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
+                mode_text = "Memetic Local Search" if (use_2opt or use_3opt) else "Smart BRKGA"
+                status_text.text(f"🧠 {mode_text} Active... Generation {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Completed! Found Optimum Makespan: {best_solution['fitness']:.2f}")
         return best_solution
 
 # ==========================================
-# 4. MODULE: INTERACTIVE MAP (PLOTLY)
+# 5. MODULE: INTERACTIVE MAP (PLOTLY)
 # ==========================================
 def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig = go.Figure()
@@ -279,29 +385,19 @@ def draw_interactive_map(nodes_data, truck_route, drone_trips):
     fig.add_trace(go.Scatter(x=[nodes_dict[0][0]], y=[nodes_dict[0][1]], mode='markers+text', name='Depot',
                              text=["DEPOT"], textposition="top center", marker=dict(size=16, color='black', symbol='square')))
     
-    # --- YENİ EKLENEN GÖRSEL DÜZENLEMELER BURADA ---
     fig.update_layout(
         title="🚁 FSTSP Optimum Route",
         xaxis_title="X Coordinate",
         yaxis_title="Y Coordinate",
         hovermode="closest",
-        plot_bgcolor='#f8f9fa', # Daha şık durması için hafif gri/kırık beyaz arka plan
-        height=750,             # Haritaya sağlam bir dikey alan verdik
-        xaxis=dict(
-            showgrid=True, 
-            gridcolor='lightgray',
-            zeroline=False
-        ),
-        yaxis=dict(
-            showgrid=True, 
-            gridcolor='lightgray',
-            zeroline=False,
-            scaleanchor="x",    # İŞİN SIRRI: X ve Y ölçeğini 1:1 kilitler (Gerçek uzaklık algısı)
-            scaleratio=1
-        ),
-        margin=dict(l=40, r=40, t=60, b=40) # Kenar boşluklarını daraltıp haritayı büyüttük
+        plot_bgcolor='#f8f9fa',
+        height=750,
+        xaxis=dict(showgrid=True, gridcolor='lightgray', zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor='lightgray', zeroline=False, scaleanchor="x", scaleratio=1),
+        margin=dict(l=40, r=40, t=60, b=40)
     )
     return fig
+
 # ==========================================
 # HELPER FUNCTION: NATURAL SORTING
 # ==========================================
@@ -311,8 +407,8 @@ def natural_sort_key(s):
 # ==========================================
 # STREAMLIT WEB APP UI
 # ==========================================
-st.set_page_config(page_title="FSTSP BRKGA Numba Engine", layout="wide")
-st.title("🚁 FSTSP: Numba JIT Supported DP-Split Engine")
+st.set_page_config(page_title="FSTSP Memetic BRKGA", layout="wide")
+st.title("🚁 FSTSP: Memetic BRKGA & DP-Split Engine")
 
 st.sidebar.header("BRKGA Parameters")
 pop_size = st.sidebar.slider("Population (p)", 50, 500, 500, 10)
@@ -320,6 +416,12 @@ elite_ratio = st.sidebar.slider("Elite Ratio (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maximum Generation", value=200, min_value=10, max_value=2000)
+
+st.sidebar.divider()
+
+st.sidebar.header("Local Search Heuristics")
+use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
+use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
 
 st.subheader("1. Dataset Selection")
 
@@ -348,7 +450,7 @@ else:
     col3.metric("Drone Speed Multiplier", parsed_data.drone_speed)
     col4.metric("Drone Battery (MAXFLY)", "Unlimited" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
-    if st.button("🚀 Start with Numba JIT Solver"):
+    if st.button("🚀 Start Optimization Engine"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -356,7 +458,7 @@ else:
         engine = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, decoder)
         
         start_time = time.time()
-        best_sol = engine.run(progress_bar, status_text)
+        best_sol = engine.run(progress_bar, status_text, use_2opt, use_3opt)
         elapsed_time = time.time() - start_time
         
         st.subheader("📊 Optimization Results")
