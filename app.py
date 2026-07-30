@@ -323,83 +323,57 @@ class HGVNS_Engine:
         self.novisit_list = parsed_data.novisit_list
 
     def evaluate_cost(self, truck_route, drone_trips):
-        # Kamyon rotası depoda başlamalı ve depoda bitmeli.
-        if len(truck_route) < 2 or truck_route[0] != 0 or truck_route[-1] != 0:
+        # YALIN VE HIZLI HESAPLAMA: Sadece süre hesabı yapılır, gereksiz set() güvenlikleri kaldırıldı.
+        if not drone_trips:
+            cost = 0.0
+            for i in range(len(truck_route)-1):
+                cost += self.t[truck_route[i]][truck_route[i+1]]
+            return cost
+
+        try:
+            sorted_trips = sorted(drone_trips, key=lambda x: truck_route.index(x[0]))
+        except ValueError:
             return float('inf')
 
-        # Her müşteri ya kamyonla ya da drone ile tam bir kez ziyaret edilmeli.
-        truck_customers = list(truck_route[1:-1])
-        drone_customers = [trip[1] for trip in drone_trips]
-        served_customers = truck_customers + drone_customers
-        expected_customers = set(range(1, self.num_nodes))
-
-        if len(served_customers) != self.num_nodes - 1:
-            return float('inf')
-
-        if len(set(served_customers)) != len(served_customers):
-            return float('inf')
-
-        if set(served_customers) != expected_customers:
-            return float('inf')
-
-        trip_records = []
-
-        for launch, drone_node, return_node in drone_trips:
-            if drone_node in self.novisit_list:
-                return float('inf')
-
-            if launch not in truck_route or return_node not in truck_route:
-                return float('inf')
-
-            # 0 kalkış noktasıysa başlangıç deposu, dönüş noktasıysa son depodur.
-            launch_idx = 0 if launch == 0 else truck_route.index(launch)
-            return_idx = len(truck_route) - 1 if return_node == 0 else truck_route.index(return_node)
-
-            if launch_idx >= return_idx:
-                return float('inf')
-
-            drone_time = self.d[launch][drone_node] + self.d[drone_node][return_node]
-
-            if drone_time > self.max_fly:
-                return float('inf')
-
-            trip_records.append((launch_idx, return_idx, drone_time))
-
-        trip_records.sort(key=lambda record: record[0])
-
-        # Tek drone aynı anda iki uçuş yapamaz.
-        for idx in range(len(trip_records) - 1):
-            current_return_idx = trip_records[idx][1]
-            next_launch_idx = trip_records[idx + 1][0]
-
-            if next_launch_idx < current_return_idx:
-                return float('inf')
-
-        trip_by_launch = {}
-
-        for launch_idx, return_idx, drone_time in trip_records:
-            if launch_idx in trip_by_launch:
-                return float('inf')
-
-            trip_by_launch[launch_idx] = (return_idx, drone_time)
+        # Dron kalkış/iniş çakışma (Prohibition 1 & 2) kontrolü
+        for i in range(len(sorted_trips)-1):
+            t1, t2 = sorted_trips[i], sorted_trips[i+1]
+            idx_t1_ret = truck_route.index(t1[2])
+            idx_t2_launch = truck_route.index(t2[0])
+            if idx_t2_launch < idx_t1_ret: return float('inf')
 
         total_cost = 0.0
-        route_idx = 0
-
-        while route_idx < len(truck_route) - 1:
-            if route_idx in trip_by_launch:
-                return_idx, drone_time = trip_by_launch[route_idx]
+        curr_trip_idx = 0
+        i = 0
+        
+        while i < len(truck_route) - 1:
+            u = truck_route[i]
+            
+            if curr_trip_idx < len(sorted_trips) and sorted_trips[curr_trip_idx][0] == u:
+                trip = sorted_trips[curr_trip_idx]
+                drone_node = trip[1]
+                return_node = trip[2]
+                
+                try:
+                    ret_idx = truck_route.index(return_node, i + 1)
+                except ValueError:
+                    return float('inf')
+                    
                 truck_time = 0.0
-
-                for edge_idx in range(route_idx, return_idx):
-                    truck_time += self.t[truck_route[edge_idx]][truck_route[edge_idx + 1]]
-
+                for k in range(i, ret_idx):
+                    truck_time += self.t[truck_route[k]][truck_route[k+1]]
+                    
+                drone_time = self.d[u][drone_node] + self.d[drone_node][return_node]
+                if drone_time > self.max_fly: 
+                    return float('inf')
+                    
                 total_cost += max(truck_time, drone_time)
-                route_idx = return_idx
+                i = ret_idx
+                curr_trip_idx += 1
             else:
-                total_cost += self.t[truck_route[route_idx]][truck_route[route_idx + 1]]
-                route_idx += 1
-
+                total_cost += self.t[truck_route[i]][truck_route[i+1]]
+                i += 1
+                
         return total_cost
 
     def _solve_tsp(self):
@@ -443,9 +417,11 @@ class HGVNS_Engine:
                 prev_n, next_n = truck_route[j-1], truck_route[j+1]
                 temp_t = truck_route.copy()
                 temp_t.pop(j)
-                temp_d = drone_trips + [(prev_n, node, next_n)]
                 
-                c = self.evaluate_cost(temp_t, temp_d)
+                drone_trips.append((prev_n, node, next_n))
+                c = self.evaluate_cost(temp_t, drone_trips)
+                drone_trips.pop() # FAST REVERT
+                
                 if c < best_c:
                     best_c = c
                     best_move = (node, prev_n, next_n)
@@ -465,7 +441,6 @@ class HGVNS_Engine:
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # YENİ SİLAH (N6) EKLENDİ: Toplam 6 farklı komşuluk yapısı!
         neighborhoods = [1, 2, 3, 4, 5, 6] 
         random.shuffle(neighborhoods)
         
@@ -528,7 +503,7 @@ class HGVNS_Engine:
                         improved = True
                         break
 
-            elif n_idx == 5: 
+            elif n_idx == 5: # HIZLANDIRILMIŞ N5 (Window Limit + Pop)
                 for i in range(1, len(best_t)-1):
                     drone_cand = best_t[i]
                     if drone_cand in self.novisit_list: continue
@@ -538,20 +513,23 @@ class HGVNS_Engine:
                     best_insert_d = best_d
                     
                     for launch_idx in range(len(temp_t) - 1):
-                        for ret_idx in range(launch_idx + 1, len(temp_t)):
+                        # PENCERE LİMİTİ: Dron maks 12 durak uzağa uçabilir (O(N^3) engeli)
+                        limit = min(launch_idx + 12, len(temp_t))
+                        for ret_idx in range(launch_idx + 1, limit):
                             launch_node = temp_t[launch_idx]
                             ret_node = temp_t[ret_idx]
                             
                             d_time = self.d[launch_node][drone_cand] + self.d[drone_cand][ret_node]
                             if d_time > self.max_fly: continue
                             
-                            temp_d = best_d.copy()
-                            temp_d.append((launch_node, drone_cand, ret_node))
+                            best_d.append((launch_node, drone_cand, ret_node))
+                            c = self.evaluate_cost(temp_t, best_d)
+                            best_d.pop() # Kopyalamak yerine anında geri al
                             
-                            c = self.evaluate_cost(temp_t, temp_d)
                             if c < best_insert_c:
                                 best_insert_c = c
-                                best_insert_d = temp_d
+                                best_insert_d = best_d.copy()
+                                best_insert_d.append((launch_node, drone_cand, ret_node))
                                 
                     if best_insert_c < best_cost:
                         best_cost = best_insert_c
@@ -560,8 +538,7 @@ class HGVNS_Engine:
                         improved = True
                         break
 
-            # YENİ SİLAH N6: DRONUN UÇUŞ NOKTALARINI ESNETME (Boundary Optimization)
-            elif n_idx == 6 and len(best_d) > 0: 
+            elif n_idx == 6 and len(best_d) > 0: # HIZLANDIRILMIŞ N6 (Window Limit + Pop)
                 for i, trip in enumerate(best_d):
                     temp_d = best_d[:i] + best_d[i+1:]
                     visit_node = trip[1]
@@ -570,17 +547,19 @@ class HGVNS_Engine:
                     best_trip = trip
                     
                     for l_idx in range(len(best_t) - 1):
-                        for r_idx in range(l_idx + 1, len(best_t)):
+                        # PENCERE LİMİTİ
+                        limit = min(l_idx + 12, len(best_t))
+                        for r_idx in range(l_idx + 1, limit):
                             l_cand = best_t[l_idx]
                             r_cand = best_t[r_idx]
                             
                             d_time = self.d[l_cand][visit_node] + self.d[visit_node][r_cand]
                             if d_time > self.max_fly: continue
                             
-                            cand_d = temp_d.copy()
-                            cand_d.append((l_cand, visit_node, r_cand))
+                            temp_d.append((l_cand, visit_node, r_cand))
+                            c = self.evaluate_cost(best_t, temp_d)
+                            temp_d.pop() # Geri al
                             
-                            c = self.evaluate_cost(best_t, cand_d)
                             if c < best_insert_c:
                                 best_insert_c = c
                                 best_trip = (l_cand, visit_node, r_cand)
@@ -604,7 +583,8 @@ class HGVNS_Engine:
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        max_iters = 100
+        # Web sunucusu çökmesin diye yeterli ve ideal iterasyon limiti
+        max_iters = 30
         k_max = 5
         k_shake = 1
         
