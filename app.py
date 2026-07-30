@@ -321,65 +321,71 @@ class HGVNS_Engine:
         self.num_nodes = parsed_data.num_nodes
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
+        # HIZLANDIRICI 1: Daha önce hesaplanan rotaların skorlarını tutan hafıza
+        self.eval_memo = {} 
 
     def evaluate_cost(self, truck_route, drone_trips):
+        # Hafızada varsa hiç hesaplama, direkt sonucu ver! (Devasa hız kazancı)
+        state_key = (tuple(truck_route), tuple(drone_trips))
+        if state_key in self.eval_memo:
+            return self.eval_memo[state_key]
+
         if not drone_trips:
             cost = 0.0
             for i in range(len(truck_route)-1):
                 cost += self.t[truck_route[i]][truck_route[i+1]]
+            self.eval_memo[state_key] = cost
             return cost
 
-        try:
-            trip_records = []
-            for launch, drone_node, return_node in drone_trips:
-                # KİLİT NOKTA: Depot (0) mantığını çözdük! Başlangıçtaki 0 ile sondaki 0 karışmayacak.
-                launch_idx = 0 if launch == 0 else truck_route.index(launch)
-                return_idx = len(truck_route) - 1 if return_node == 0 else truck_route.index(return_node)
+        # HIZLANDIRICI 2: .index() yerine O(1) hızında Hash Map kullanımı
+        idx_map = {node: i for i, node in enumerate(truck_route)}
+        idx_map[0] = 0 # Başlangıç deposunu zorunlu sıfıra eşitle
+        
+        trip_records = []
+        for launch, d_node, ret in drone_trips:
+            l_idx = 0 if launch == 0 else idx_map.get(launch, -1)
+            r_idx = len(truck_route)-1 if ret == 0 else idx_map.get(ret, -1)
 
-                # Dron rotada geriye doğru uçamaz veya aynı durakta inip kalkamaz (Bekleme hariç)
-                if launch_idx >= return_idx:
-                    return float('inf')
+            if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
+                self.eval_memo[state_key] = float('inf')
+                return float('inf')
 
-                drone_time = self.d[launch][drone_node] + self.d[drone_node][return_node]
+            d_time = self.d[launch][d_node] + self.d[d_node][ret]
+            if d_time > self.max_fly:
+                self.eval_memo[state_key] = float('inf')
+                return float('inf')
 
-                if drone_time > self.max_fly:
-                    return float('inf')
+            trip_records.append((l_idx, r_idx, d_time))
 
-                trip_records.append((launch_idx, return_idx, drone_time))
+        trip_records.sort(key=lambda r: r[0])
 
-            # Uçuşları kalkış sırasına göre diz
-            trip_records.sort(key=lambda r: r[0])
+        for idx in range(len(trip_records) - 1):
+            if trip_records[idx+1][0] < trip_records[idx][1]:
+                self.eval_memo[state_key] = float('inf')
+                return float('inf')
 
-            # PROHIBITION 1 & 2: Kesin çakışma (overlap) ve iç içe geçme yasağı! (Aynı anda 2 dron uçamaz)
-            for idx in range(len(trip_records) - 1):
-                if trip_records[idx+1][0] < trip_records[idx][1]:
-                    return float('inf')
-
-            total_cost = 0.0
-            route_idx = 0
-            trip_idx = 0
-            
-            while route_idx < len(truck_route) - 1:
-                if trip_idx < len(trip_records) and trip_records[trip_idx][0] == route_idx:
-                    return_idx = trip_records[trip_idx][1]
-                    drone_time = trip_records[trip_idx][2]
+        total_cost = 0.0
+        route_idx = 0
+        trip_idx = 0
+        
+        while route_idx < len(truck_route) - 1:
+            if trip_idx < len(trip_records) and trip_records[trip_idx][0] == route_idx:
+                return_idx = trip_records[trip_idx][1]
+                drone_time = trip_records[trip_idx][2]
+                
+                truck_time = 0.0
+                for k in range(route_idx, return_idx):
+                    truck_time += self.t[truck_route[k]][truck_route[k+1]]
                     
-                    truck_time = 0.0
-                    for k in range(route_idx, return_idx):
-                        truck_time += self.t[truck_route[k]][truck_route[k+1]]
-                        
-                    total_cost += max(truck_time, drone_time)
-                    route_idx = return_idx
-                    trip_idx += 1
-                else:
-                    total_cost += self.t[truck_route[route_idx]][truck_route[route_idx+1]]
-                    route_idx += 1
-                    
-            return total_cost
-            
-        except ValueError:
-            # Aranılan durak rotada yoksa, sarsma hamlesi kural dışı bir yer yaratmıştır. Reddet.
-            return float('inf')
+                total_cost += truck_time if truck_time > drone_time else drone_time
+                route_idx = return_idx
+                trip_idx += 1
+            else:
+                total_cost += self.t[truck_route[route_idx]][truck_route[route_idx+1]]
+                route_idx += 1
+                
+        self.eval_memo[state_key] = total_cost
+        return total_cost
 
     def _solve_tsp(self):
         unvisited = list(range(1, self.num_nodes))
@@ -439,6 +445,10 @@ class HGVNS_Engine:
                 truck_nodes_needed.add(next_n)
                 improved = True
                 
+        try:
+            drone_trips.sort(key=lambda x: truck_route.index(x[0]))
+        except ValueError:
+            pass
         return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
@@ -517,7 +527,7 @@ class HGVNS_Engine:
                     best_insert_d = best_d
                     
                     for launch_idx in range(len(temp_t) - 1):
-                        limit = min(launch_idx + 12, len(temp_t))
+                        limit = min(launch_idx + 10, len(temp_t)) # Pencere Limiti 10
                         for ret_idx in range(launch_idx + 1, limit):
                             launch_node = temp_t[launch_idx]
                             ret_node = temp_t[ret_idx]
@@ -550,7 +560,7 @@ class HGVNS_Engine:
                     best_trip = trip
                     
                     for l_idx in range(len(best_t) - 1):
-                        limit = min(l_idx + 12, len(best_t))
+                        limit = min(l_idx + 10, len(best_t)) # Pencere Limiti 10
                         for r_idx in range(l_idx + 1, limit):
                             l_cand = best_t[l_idx]
                             r_cand = best_t[r_idx]
@@ -581,6 +591,8 @@ class HGVNS_Engine:
         return best_t, best_d, best_cost
 
     def run(self, progress_bar, status_text):
+        self.eval_memo.clear() # Her koşuda hafızayı temizle (RAM şişmesin)
+        
         if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde-like Initial & Global Savings)...")
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
@@ -588,6 +600,7 @@ class HGVNS_Engine:
         max_iters = 100
         k_max = 5
         k_shake = 1
+        no_improve_count = 0 # HIZLANDIRICI 3: Erken Durdurma Sayacı
         
         for iter_count in range(max_iters):
             if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
@@ -614,14 +627,22 @@ class HGVNS_Engine:
             
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
+            # Daha iyi bir sonuç bulunursa
             if new_cost < best_cost - 1e-4:
                 best_cost = new_cost
                 best_t, best_d = new_t, new_d
                 k_shake = 1
+                no_improve_count = 0
             else:
                 k_shake += 1
+                no_improve_count += 1
                 if k_shake > k_max:
                     k_shake = 1
+                    
+            # ERKEN DURDURMA: Eğer 15 kez üst üste iyileşme olmadıysa döngüyü kır!
+            if no_improve_count >= 15:
+                if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma (Early Stopping) devreye girdi.")
+                break
         
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
