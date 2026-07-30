@@ -436,7 +436,8 @@ class HGVNS_Engine:
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        neighborhoods = [1, 2, 3, 4, 5] 
+        # YENİ SİLAH (N6) EKLENDİ: Toplam 6 farklı komşuluk yapısı!
+        neighborhoods = [1, 2, 3, 4, 5, 6] 
         random.shuffle(neighborhoods)
         
         k = 0
@@ -530,6 +531,37 @@ class HGVNS_Engine:
                         improved = True
                         break
 
+            # YENİ SİLAH N6: DRONUN UÇUŞ NOKTALARINI ESNETME (Boundary Optimization)
+            elif n_idx == 6 and len(best_d) > 0: 
+                for i, trip in enumerate(best_d):
+                    temp_d = best_d[:i] + best_d[i+1:]
+                    visit_node = trip[1]
+                    
+                    best_insert_c = float('inf')
+                    best_trip = trip
+                    
+                    for l_idx in range(len(best_t) - 1):
+                        for r_idx in range(l_idx + 1, len(best_t)):
+                            l_cand = best_t[l_idx]
+                            r_cand = best_t[r_idx]
+                            
+                            d_time = self.d[l_cand][visit_node] + self.d[visit_node][r_cand]
+                            if d_time > self.max_fly: continue
+                            
+                            cand_d = temp_d.copy()
+                            cand_d.append((l_cand, visit_node, r_cand))
+                            
+                            c = self.evaluate_cost(best_t, cand_d)
+                            if c < best_insert_c:
+                                best_insert_c = c
+                                best_trip = (l_cand, visit_node, r_cand)
+                                
+                    if best_insert_c < best_cost:
+                        best_cost = best_insert_c
+                        best_d = temp_d + [best_trip]
+                        improved = True
+                        break
+
             if improved:
                 random.shuffle(neighborhoods)
                 k = 0
@@ -551,7 +583,6 @@ class HGVNS_Engine:
             if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
             if status_text: status_text.text(f"HGVNS: Alg 3 & 4 (GVNS Search)... Iter: {iter_count+1}/{max_iters} | Score: {best_cost:.2f}")
             
-            # --- AKILLI SARSMA (Robust Shake) - INF TUZAĞINI BOZAN YER ---
             shaken_t, shaken_d = best_t.copy(), best_d.copy()
             for _ in range(k_shake):
                 if len(shaken_t) <= 3: break
@@ -559,7 +590,6 @@ class HGVNS_Engine:
                 idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
                 node1, node2 = shaken_t[idx1], shaken_t[idx2]
                 
-                # Eğer sarsılan düğümler dron bağlantılıysa, inf vermesin diye o uçuşu kargoya iade et (Dissolve)
                 new_d = []
                 for trip in shaken_d:
                     if trip[0] in (node1, node2) or trip[2] in (node1, node2):
@@ -569,11 +599,9 @@ class HGVNS_Engine:
                         new_d.append(trip)
                 shaken_d = new_d
                 
-                # Indexler değişmiş olabilir, güncelleyip swap işlemini tamamla
                 i1, i2 = shaken_t.index(node1), shaken_t.index(node2)
                 shaken_t[i1], shaken_t[i2] = shaken_t[i2], shaken_t[i1]
             
-            # Arama Aşaması
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
             if new_cost < best_cost - 1e-4:
@@ -731,7 +759,6 @@ else:
                 c_rep2.info(f"⏱️ **Computation Time**\n\nBRKGA: {time_b:.2f}s | HGVNS: {time_h:.2f}s")
                 c_rep3.info(f"🚁 **Drone Utilization**\n\nBRKGA: {len(sol_b['drone_trips'])} trips | HGVNS: {len(sol_h['drone_trips'])} trips")
                 
-                # --- ROUTE BREAKDOWNS ---
                 st.write("---")
                 col_r1, col_r2 = st.columns(2)
                 with col_r1:
