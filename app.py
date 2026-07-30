@@ -80,33 +80,39 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODULE: FAST LOCAL SEARCH (2-OPT & 3-OPT)
+# 2. MODULE: FAST LOCAL SEARCH (SAFE MODE)
 # ==========================================
 @njit
 def fast_2opt(route, t_matrix):
-    """Reverses segments to untangle crossed routes"""
     n = len(route)
     improved = True
     best_route = route.copy()
-    while improved:
+    iters = 0
+    max_iters = 30 # Sonsuz döngü (infinite loop) kilidini kırmak için güvenlik valfi
+    
+    while improved and iters < max_iters:
         improved = False
+        iters += 1
         for i in range(1, n - 2):
             for j in range(i + 1, n - 1):
                 d1 = t_matrix[best_route[i-1], best_route[i]] + t_matrix[best_route[j], best_route[j+1]]
                 d2 = t_matrix[best_route[i-1], best_route[j]] + t_matrix[best_route[i], best_route[j+1]]
-                if d2 < d1 - 1e-6:
+                if d2 < d1 - 1e-5:
                     best_route[i:j+1] = best_route[i:j+1][::-1]
                     improved = True
     return best_route
 
 @njit
 def fast_3opt_relocation(route, t_matrix):
-    """Relocates a single node (breaks 3 edges) for deep neighborhood search"""
     n = len(route)
     improved = True
     best_route = route.copy()
-    while improved:
+    iters = 0
+    max_iters = 20 # 3-Opt çok ağır olduğu için limiti 20'de tuttuk
+    
+    while improved and iters < max_iters:
         improved = False
+        iters += 1
         for i in range(1, n - 1):
             for j in range(1, n - 1):
                 if i == j or i == j - 1:
@@ -121,7 +127,7 @@ def fast_3opt_relocation(route, t_matrix):
                 d_old = t_matrix[prev_i, node_i] + t_matrix[node_i, next_i] + t_matrix[node_j, next_j]
                 d_new = t_matrix[prev_i, next_i] + t_matrix[node_j, node_i] + t_matrix[node_i, next_j]
                 
-                if d_new < d_old - 1e-6:
+                if d_new < d_old - 1e-5:
                     new_route = np.zeros_like(best_route)
                     idx = 0
                     for k in range(n):
@@ -172,13 +178,11 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
             pure_t[j] = curr_dist
 
         for j in range(i + 1, limit_j):
-            # Case 1: Truck Only
             if cost[i] + pure_t[j] < cost[j]:
                 cost[j] = cost[i] + pure_t[j]
                 path_prev[j] = i
                 path_drone[j] = -1
 
-            # Case 2: Truck + Drone (Simultaneous Operation)
             if j >= i + 2:
                 for k in range(i + 1, j):
                     drone_cust = seq[k]
@@ -214,7 +218,6 @@ class DPSplitDecoder:
 
     def decode(self, rk_route):
         rk_arr = np.array(rk_route, dtype=np.float64)
-        
         cost, path_prev, path_drone, seq = numba_fast_dp_decode(
             rk_arr, self.t, self.d, self.num_nodes, self.novisit_mask, self.max_fly
         )
@@ -223,7 +226,6 @@ class DPSplitDecoder:
         if cost == np.inf:
             return float('inf'), [], []
 
-        # Backtracking
         curr = N - 1
         segments = []
         while curr != 0:
@@ -240,14 +242,13 @@ class DPSplitDecoder:
             for x in range(prev_i + 1, curr_i + 1):
                 if seq[x] != drone_cust:
                     truck_route.append(int(seq[x]))
-            
             if drone_cust is not None:
                 drone_trips.append((int(seq[prev_i]), int(drone_cust), int(seq[curr_i])))
                 
         return cost, truck_route, drone_trips
 
 # ==========================================
-# 4. MODULE: BRKGA MEMETIC EVOLUTION ENGINE
+# 4. MODULE: BRKGA PROBABILISTIC MEMETIC ENGINE
 # ==========================================
 class BRKGA_Engine:
     def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
@@ -277,11 +278,13 @@ class BRKGA_Engine:
             'fitness': float('inf'), 'truck_route': [], 'drone_trips': []
         }
 
-    def evaluate(self, ind, use_2opt, use_3opt):
+    def evaluate(self, ind, use_2opt, use_3opt, force_ls=False):
         rk_route = np.array(ind['route'])
         
-        # LAMARCKIAN EVOLUTION: Apply Local Search and write back to genes
-        if use_2opt or use_3opt:
+        # LS PROBABILITY: Sunucuyu korumak için LS sadece %10 ihtimalle çalışır (PMA Mimarisi)
+        apply_ls = (use_2opt or use_3opt) and (force_ls or random.random() < 0.10)
+        
+        if apply_ls:
             customers = np.arange(1, self.num_cust + 1)
             sorted_indices = np.argsort(rk_route)
             seq = customers[sorted_indices]
@@ -289,23 +292,19 @@ class BRKGA_Engine:
             full_seq = np.zeros(len(seq) + 2, dtype=np.int32)
             full_seq[1:-1] = seq
             
-            # Apply Numba Optimized Local Searches
             if use_2opt:
                 full_seq = fast_2opt(full_seq, self.decoder.t)
             if use_3opt:
                 full_seq = fast_3opt_relocation(full_seq, self.decoder.t)
                 
-            # Convert optimized sequence back to BRKGA random keys
             new_seq = full_seq[1:-1]
             new_rk = np.zeros(len(new_seq))
             spacing = 1.0 / (len(new_seq) + 1)
             for i, cust in enumerate(new_seq):
                 orig_idx = cust - 1 
                 new_rk[orig_idx] = (i + 1) * spacing
-                
             ind['route'] = new_rk.tolist()
 
-        # Pass final genes to DP-Split Decoder
         cost, t_route, d_trips = self.decoder.decode(ind['route'])
         ind['fitness'] = cost
         ind['truck_route'] = t_route
@@ -333,7 +332,6 @@ class BRKGA_Engine:
                     new_mut = self.create_smart_mutant(elites)
                 else:
                     new_mut = self.create_individual()
-                    
                 self.evaluate(new_mut, use_2opt, use_3opt)
                 mutants.append(new_mut)
                 
@@ -343,7 +341,6 @@ class BRKGA_Engine:
             for _ in range(num_offspring):
                 parent_a = random.choice(elites)
                 parent_b = random.choice(non_elites) if non_elites else random.choice(elites)
-                
                 child = {'route': [], 'fitness': float('inf')}
                 for i in range(self.num_cust):
                     child['route'].append(parent_a['route'][i] if random.random() < self.rho_e else parent_b['route'][i])
@@ -355,8 +352,8 @@ class BRKGA_Engine:
             
             if gen % 10 == 0:
                 progress_bar.progress((gen + 1) / self.max_gen)
-                mode_text = "Memetic Local Search" if (use_2opt or use_3opt) else "Smart BRKGA"
-                status_text.text(f"🧠 {mode_text} Active... Generation {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
+                mode_text = "Memetic PMA (Safe Mode)" if (use_2opt or use_3opt) else "Smart BRKGA"
+                status_text.text(f"🧠 {mode_text}... Generation {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
         progress_bar.progress(1.0)
         status_text.text(f"Completed! Found Optimum Makespan: {best_solution['fitness']:.2f}")
@@ -422,6 +419,7 @@ st.sidebar.divider()
 st.sidebar.header("Local Search Heuristics")
 use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
 use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
+st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
 
 st.subheader("1. Dataset Selection")
 
