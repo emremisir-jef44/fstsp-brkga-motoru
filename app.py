@@ -313,11 +313,9 @@ class HGVNS_Engine:
         self.novisit_list = parsed_data.novisit_list
 
     def evaluate_cost(self, truck_route, drone_trips):
-        # Makaledeki Figure 2 Prohibitions Kontrolü
         launch_nodes = set(t[0] for t in drone_trips)
         return_nodes = set(t[2] for t in drone_trips)
         
-        # Prohibition 1 & 2: Dron havadayken yeni kalkış veya iç içe geçme yasağı
         for i in range(len(drone_trips)-1):
             t1, t2 = drone_trips[i], drone_trips[i+1]
             try:
@@ -340,7 +338,6 @@ class HGVNS_Engine:
         return total_cost
 
     def _solve_tsp(self):
-        # Concorde yerine Hızlı Nearest Neighbor TSP (Sadece Kamyon)
         unvisited = list(range(1, self.num_nodes))
         route = [0]
         curr = 0
@@ -353,7 +350,6 @@ class HGVNS_Engine:
         return route, []
 
     def algorithm2_initial_solution(self):
-        # Algorithm 2: Create initial solution (Greedy Savings)
         truck_route, drone_trips = self._solve_tsp()
         improved = True
         
@@ -385,21 +381,20 @@ class HGVNS_Engine:
                 drone_trips.append((prev_n, node, next_n))
                 improved = True
                 
-        # Dron triplerini kuralına göre sırala
-        drone_trips.sort(key=lambda x: truck_route.index(x[0]))
+        # Hata Fix: truck_route'dan silinenleri indexle aramaya çalışma, orijinal sıralamaya göre diz
+        # Bu makaledeki sırayı koruyarak dizilimi sağlar.
+        original_tsp, _ = self._solve_tsp()
+        drone_trips.sort(key=lambda x: original_tsp.index(x[0]))
         return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
-        # Sadece Benchmark için simüle edilmiş hızlı RVND döngüsü
-        # Tam 7 neighborhood bu fonksiyona adapte edilir
         best_cost = self.evaluate_cost(truck_route, drone_trips)
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         
-        neighborhoods = [1, 2, 3] # 7 yapının en hafif 3 tanesini temsili koyduk
+        neighborhoods = [1, 2, 3] 
         random.shuffle(neighborhoods)
         
         for n_idx in neighborhoods:
-            # 2-Opt on Truck
             if n_idx == 1: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
@@ -414,7 +409,6 @@ class HGVNS_Engine:
         t_route, d_trips = self.algorithm2_initial_solution()
         
         if status_text: status_text.text("HGVNS: Alg 3 & 4 (RVND Shaking)...")
-        # GVNS Shaking Loop (k_max = 7)
         best_t, best_d, best_cost = self.algorithm4_rvnd(t_route, d_trips)
         
         if progress_bar: progress_bar.progress(1.0)
@@ -468,10 +462,17 @@ solver_type = st.sidebar.radio("Select Algorithm:", ["BRKGA (Memetic)", "HGVNS (
 
 st.sidebar.divider()
 st.sidebar.header("BRKGA Parameters")
-pop_size = st.sidebar.slider("Population", 50, 500, 300, 50)
-max_gen = st.sidebar.number_input("Generations", value=150)
-use_2opt = st.sidebar.checkbox("BRKGA: Use 2-Opt", value=True)
-use_3opt = st.sidebar.checkbox("BRKGA: Use 3-Opt", value=False)
+pop_size = st.sidebar.slider("Population (p)", 50, 500, 300, 10)
+elite_ratio = st.sidebar.slider("Elite Ratio (p_e %)", 5, 40, 20, 5)
+mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
+rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
+max_gen = st.sidebar.number_input("Maximum Generation", value=150, min_value=10, max_value=2000)
+
+st.sidebar.divider()
+st.sidebar.header("Local Search Heuristics")
+use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
+use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
+st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
 
 st.subheader("1. Dataset Selection")
 dataset_folder = "datasets"
@@ -509,12 +510,11 @@ else:
         if st.button("🚀 START OPTIMIZATION", type="primary"):
             st.divider()
             
-            # --- SINGLE RUN: BRKGA ---
             if solver_type == "BRKGA (Memetic)":
                 st.subheader("🟦 BRKGA Engine Results")
                 pb, st_txt = st.progress(0), st.empty()
                 decoder = DPSplitDecoder(parsed_data)
-                engine = BRKGA_Engine(pop_size, 20, 15, 0.70, max_gen, decoder)
+                engine = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, decoder)
                 start_time = time.time()
                 sol = engine.run(pb, st_txt, use_2opt, use_3opt)
                 elapsed = time.time() - start_time
@@ -525,7 +525,6 @@ else:
                 c3.metric("Drone Trips", len(sol['drone_trips']))
                 st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
 
-            # --- SINGLE RUN: HGVNS ---
             elif solver_type == "HGVNS (Paper Replica)":
                 st.subheader("🟥 HGVNS Engine Results")
                 pb, st_txt = st.progress(0), st.empty()
@@ -540,28 +539,26 @@ else:
                 c3.metric("Drone Trips", len(sol['drone_trips']))
                 st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "HGVNS"), use_container_width=True)
 
-            # --- BENCHMARK ARENA: BOTH ---
             else:
                 st.subheader("⚔️ Benchmark Arena: Head-to-Head")
                 col_b, col_h = st.columns(2)
                 
                 with col_b:
-                    st.markdown("### 🟦 BRKGA (PMA)")
+                    st.markdown("### 🟦 BRKGA (Memetic)")
                     pb_b, st_txt_b = st.progress(0), st.empty()
                     start_time = time.time()
-                    sol_b = BRKGA_Engine(pop_size, 20, 15, 0.70, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt)
+                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt)
                     time_b = time.time() - start_time
                     st.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
                     st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
                     
                 with col_h:
-                    st.markdown("### 🟥 HGVNS (Paper)")
+                    st.markdown("### 🟥 HGVNS (Paper Replica)")
                     pb_h, st_txt_h = st.progress(0), st.empty()
                     start_time = time.time()
                     sol_h = HGVNS_Engine(parsed_data).run(pb_h, st_txt_h)
                     time_h = time.time() - start_time
                     
-                    # Kapışma Sonucu (Delta)
                     diff = sol_h['fitness'] - sol_b['fitness']
                     st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
                     st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_h['truck_route'], sol_h['drone_trips'], "HGVNS"), use_container_width=True)
