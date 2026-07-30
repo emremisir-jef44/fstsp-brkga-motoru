@@ -312,55 +312,21 @@ class BRKGA_Engine:
         return best_solution
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (RED CORNER - PAPER REPLICA)
+# 3. MODULE: HGVNS ENGINE (STRICT PAPER REPLICA)
 # ==========================================
 class HGVNS_Engine:
-    def __init__(self, parsed_data):
+    def __init__(self, parsed_data, custom_tsp=None):
         self.t = parsed_data.truck_time_matrix
         self.d = parsed_data.drone_time_matrix
         self.num_nodes = parsed_data.num_nodes
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
+        self.custom_tsp = custom_tsp
         self.eval_memo = {} 
 
-    def _repair_trips(self, t_route, d_trips):
-        idx_map = {n: i for i, n in enumerate(t_route)}
-        idx_map[0] = 0
-        
-        temp_trips = []
-        for l, d, r in d_trips:
-            l_idx = idx_map.get(l, -1)
-            r_idx = len(t_route)-1 if r==0 else idx_map.get(r, -1)
-            
-            # Eğer durak kayıpsa orijinali dön, evaluate_cost inf versin!
-            if l_idx == -1 or r_idx == -1: 
-                return d_trips 
-                
-            if l_idx > r_idx:
-                temp_trips.append((r_idx, l_idx, r, d, l)) 
-            elif l_idx < r_idx:
-                temp_trips.append((l_idx, r_idx, l, d, r)) 
-            else:
-                return d_trips # l_idx == r_idx durumu, iptal.
-                
-        temp_trips.sort(key=lambda x: x[0])
-        
-        valid_trips = []
-        last_ret = -1
-        for trip in temp_trips:
-            if trip[0] >= last_ret: 
-                valid_trips.append((trip[2], trip[3], trip[4]))
-                last_ret = trip[1]
-            else:
-                # Çakışma kurtarılamadıysa kargoyu atmak yerine orijinali dön!
-                return d_trips 
-                
-        return valid_trips
-
     def evaluate_cost(self, truck_route, drone_trips):
-        # KUSURSUZ GÜVENLİK KİLİDİ: Müşteri kaybı var mı?
-        # Kamyondaki düğüm sayısı (Baştaki ve Sondaki Depot hariç = -2)
-        # Artı drone ile gidilen düğüm sayısı. Toplamı tüm müşterilere eşit olmalı!
+        # KUSURSUZ GÜVENLİK KİLİDİ: Müşteri kaybı KESİNLİKLE yasak. 
+        # (Makalede rotadan müşteri düşürülemez kuralı)
         if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
             return float('inf')
 
@@ -383,6 +349,7 @@ class HGVNS_Engine:
             l_idx = idx_map.get(launch, -1)
             r_idx = len(truck_route)-1 if ret == 0 else idx_map.get(ret, -1)
 
+            # Strict Paper Rule: Dron havada geriye uçamaz! (l_idx >= r_idx)
             if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
                 self.eval_memo[state_key] = float('inf')
                 return float('inf')
@@ -396,6 +363,7 @@ class HGVNS_Engine:
 
         trip_records.sort(key=lambda r: r[0])
 
+        # Strict Paper Rule (Prohibition 1 & 2): İki dron aynı anda havada olamaz.
         for idx in range(len(trip_records) - 1):
             if trip_records[idx+1][0] < trip_records[idx][1]:
                 self.eval_memo[state_key] = float('inf')
@@ -425,40 +393,32 @@ class HGVNS_Engine:
         return total_cost
 
     def _solve_tsp(self):
-        best_tsp = None
-        best_c = float('inf')
+        # Concorde TSP Yükleyici Devrede!
+        if self.custom_tsp and len(self.custom_tsp) > 2:
+            return self.custom_tsp.copy(), []
+
+        # Yedek sistem (Dosya bulunamazsa Nearest Neighbor)
+        unvisited = list(range(1, self.num_nodes))
+        route = [0]
+        curr = 0
+        while unvisited:
+            next_node = min(unvisited, key=lambda x: self.t[curr][x])
+            route.append(next_node)
+            unvisited.remove(next_node)
+            curr = next_node
+        route.append(0)
         
-        for start_node in range(1, self.num_nodes):
-            unvisited = list(range(1, self.num_nodes))
-            unvisited.remove(start_node)
-            route = [0, start_node]
-            curr = start_node
-            
-            while unvisited:
-                next_node = min(unvisited, key=lambda x: self.t[curr][x])
-                route.append(next_node)
-                unvisited.remove(next_node)
-                curr = next_node
-            route.append(0)
-            
-            improved = True
-            while improved:
-                improved = False
-                for i in range(1, len(route) - 2):
-                    for j in range(i + 1, len(route) - 1):
-                        d1 = self.t[route[i-1]][route[i]] + self.t[route[j]][route[j+1]]
-                        d2 = self.t[route[i-1]][route[j]] + self.t[route[i]][route[j+1]]
-                        if d2 < d1 - 1e-5:
-                            route[i:j+1] = route[i:j+1][::-1]
-                            improved = True
-                            
-            c = 0
-            for i in range(len(route)-1): c += self.t[route[i]][route[i+1]]
-            if c < best_c:
-                best_c = c
-                best_tsp = route.copy()
-                
-        return best_tsp, []
+        improved = True
+        while improved:
+            improved = False
+            for i in range(1, len(route) - 2):
+                for j in range(i + 1, len(route) - 1):
+                    d1 = self.t[route[i-1]][route[i]] + self.t[route[j]][route[j+1]]
+                    d2 = self.t[route[i-1]][route[j]] + self.t[route[i]][route[j+1]]
+                    if d2 < d1 - 1e-5:
+                        route[i:j+1] = route[i:j+1][::-1]
+                        improved = True
+        return route, []
 
     def algorithm2_initial_solution(self):
         truck_route, drone_trips = self._solve_tsp()
@@ -495,7 +455,11 @@ class HGVNS_Engine:
                 truck_nodes_needed.add(next_n)
                 improved = True
                 
-        return truck_route, self._repair_trips(truck_route, drone_trips)
+        try:
+            drone_trips.sort(key=lambda x: truck_route.index(x[0]))
+        except ValueError:
+            pass
+        return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
         best_t, best_d = truck_route.copy(), drone_trips.copy()
@@ -513,10 +477,9 @@ class HGVNS_Engine:
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
-                        new_d = self._repair_trips(new_t, best_d) 
-                        c = self.evaluate_cost(new_t, new_d)
+                        c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost:
-                            best_cost, best_t, best_d = c, new_t, new_d
+                            best_cost, best_t = c, new_t
                             improved = True
                             break
                     if improved: break
@@ -526,10 +489,9 @@ class HGVNS_Engine:
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
                         new_t[i], new_t[j] = new_t[j], new_t[i]
-                        new_d = self._repair_trips(new_t, best_d)
-                        c = self.evaluate_cost(new_t, new_d)
+                        c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost:
-                            best_cost, best_t, best_d = c, new_t, new_d
+                            best_cost, best_t = c, new_t
                             improved = True
                             break
                     if improved: break
@@ -541,10 +503,9 @@ class HGVNS_Engine:
                     for j in range(1, len(temp_t)):
                         if i == j: continue
                         new_t = temp_t[:j] + [node] + temp_t[j:]
-                        new_d = self._repair_trips(new_t, best_d)
-                        c = self.evaluate_cost(new_t, new_d)
+                        c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost:
-                            best_cost, best_t, best_d = c, new_t, new_d
+                            best_cost, best_t = c, new_t
                             improved = True
                             break
                     if improved: break
@@ -557,13 +518,12 @@ class HGVNS_Engine:
                     best_insert_t = best_t
                     for j in range(1, len(best_t)):
                         new_t = best_t[:j] + [node] + best_t[j:]
-                        repaired_d = self._repair_trips(new_t, new_d)
-                        c = self.evaluate_cost(new_t, repaired_d)
+                        c = self.evaluate_cost(new_t, new_d)
                         if c < best_insert_c:
                             best_insert_c, best_insert_t = c, new_t
                     
                     if best_insert_c < best_cost:
-                        best_cost, best_t, best_d = best_insert_c, best_insert_t, self._repair_trips(best_insert_t, new_d)
+                        best_cost, best_t, best_d = best_insert_c, best_insert_t, new_d
                         improved = True
                         break
 
@@ -577,7 +537,7 @@ class HGVNS_Engine:
                     best_insert_d = best_d
                     
                     for launch_idx in range(len(temp_t) - 1):
-                        limit = min(launch_idx + 20, len(temp_t))
+                        limit = min(launch_idx + 10, len(temp_t))
                         for ret_idx in range(launch_idx + 1, limit):
                             launch_node = temp_t[launch_idx]
                             ret_node = temp_t[ret_idx]
@@ -585,14 +545,14 @@ class HGVNS_Engine:
                             d_time = self.d[launch_node][drone_cand] + self.d[drone_cand][ret_node]
                             if d_time > self.max_fly: continue
                             
-                            cand_d = best_d.copy()
-                            cand_d.append((launch_node, drone_cand, ret_node))
-                            cand_d = self._repair_trips(temp_t, cand_d)
+                            best_d.append((launch_node, drone_cand, ret_node))
+                            c = self.evaluate_cost(temp_t, best_d)
+                            best_d.pop()
                             
-                            c = self.evaluate_cost(temp_t, cand_d)
                             if c < best_insert_c:
                                 best_insert_c = c
-                                best_insert_d = cand_d
+                                best_insert_d = best_d.copy()
+                                best_insert_d.append((launch_node, drone_cand, ret_node))
                                 
                     if best_insert_c < best_cost:
                         best_cost = best_insert_c
@@ -610,7 +570,7 @@ class HGVNS_Engine:
                     best_trip = trip
                     
                     for l_idx in range(len(best_t) - 1):
-                        limit = min(l_idx + 20, len(best_t))
+                        limit = min(l_idx + 10, len(best_t))
                         for r_idx in range(l_idx + 1, limit):
                             l_cand = best_t[l_idx]
                             r_cand = best_t[r_idx]
@@ -618,18 +578,17 @@ class HGVNS_Engine:
                             d_time = self.d[l_cand][visit_node] + self.d[visit_node][r_cand]
                             if d_time > self.max_fly: continue
                             
-                            cand_d = temp_d.copy()
-                            cand_d.append((l_cand, visit_node, r_cand))
-                            cand_d = self._repair_trips(best_t, cand_d)
+                            temp_d.append((l_cand, visit_node, r_cand))
+                            c = self.evaluate_cost(best_t, temp_d)
+                            temp_d.pop()
                             
-                            c = self.evaluate_cost(best_t, cand_d)
                             if c < best_insert_c:
                                 best_insert_c = c
                                 best_trip = (l_cand, visit_node, r_cand)
                                 
                     if best_insert_c < best_cost:
                         best_cost = best_insert_c
-                        best_d = self._repair_trips(best_t, temp_d + [best_trip])
+                        best_d = temp_d + [best_trip]
                         improved = True
                         break
 
@@ -642,15 +601,16 @@ class HGVNS_Engine:
         return best_t, best_d, best_cost
 
     def run(self, progress_bar, status_text):
-        self.eval_memo.clear()
-        if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde-like Initial & Global Savings)...")
+        self.eval_memo.clear() 
+        
+        if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde Initial & Global Savings)...")
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
         max_iters = 100
-        k_max = 7
+        k_max = 5
         k_shake = 1
-        no_improve_count = 0
+        no_improve_count = 0 
         
         for iter_count in range(max_iters):
             if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
@@ -661,9 +621,21 @@ class HGVNS_Engine:
                 if len(shaken_t) <= 3: break
                 
                 idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
-                shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
+                node1, node2 = shaken_t[idx1], shaken_t[idx2]
+                
+                # Sadece güvenli bir şekilde bağlı dron uçuşlarını kargoya çevir
+                new_d = []
+                for trip in shaken_d:
+                    if trip[0] in (node1, node2) or trip[2] in (node1, node2):
+                        insert_idx = random.randint(1, len(shaken_t)-1)
+                        shaken_t.insert(insert_idx, trip[1])
+                    else:
+                        new_d.append(trip)
+                shaken_d = new_d
+                
+                i1, i2 = shaken_t.index(node1), shaken_t.index(node2)
+                shaken_t[i1], shaken_t[i2] = shaken_t[i2], shaken_t[i1]
             
-            shaken_d = self._repair_trips(shaken_t, shaken_d)
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
             if new_cost < best_cost - 1e-4:
@@ -677,8 +649,8 @@ class HGVNS_Engine:
                 if k_shake > k_max:
                     k_shake = 1
                     
-            if no_improve_count >= 30: 
-                if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma devreye girdi.")
+            if no_improve_count >= 15:
+                if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma (Early Stopping) devreye girdi.")
                 break
         
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
@@ -737,6 +709,11 @@ rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maximum Generation", value=150, min_value=10, max_value=2000)
 
 st.sidebar.divider()
+st.sidebar.header("Advanced / Paper Tricks")
+use_custom_tsp = st.sidebar.checkbox("Auto-Load Optimal TSP Route (Concorde)", value=True)
+parsed_tsp = None
+
+st.sidebar.divider()
 st.sidebar.header("Local Search Heuristics")
 use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
 use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
@@ -776,6 +753,48 @@ else:
         with open(os.path.join(dataset_folder, selected_file), 'r', encoding='utf-8') as f:
             parsed_data = FSTSP_Parser(f.read())
             
+        # OTOMATİK TSP DOSYASI OKUMA (Parser) - Ana Dizindeki "solutions/" Klasöründen!
+        if use_custom_tsp:
+            base_name = os.path.splitext(selected_file)[0]
+            sol_folder = "solutions"
+            tsp_path = None
+            
+            for ext in [".txt", "", "-tsp.txt", "-tsp"]:
+                temp_path = os.path.join(sol_folder, f"{base_name}-tsp{ext}")
+                if os.path.exists(temp_path):
+                    tsp_path = temp_path
+                    break
+                # Belki direkt uniform-71-n50 formatında bırakmışsındır diye B planı:
+                temp_path2 = os.path.join(sol_folder, f"{base_name}{ext}")
+                if os.path.exists(temp_path2):
+                    tsp_path = temp_path2
+                    break
+            
+            if tsp_path:
+                try:
+                    with open(tsp_path, 'r') as f:
+                        lines = f.readlines()
+                    route = []
+                    for line in lines:
+                        line = line.strip()
+                        # Başında /* olan yorum satırlarını atla
+                        if not line or line.startswith('/*'): continue
+                        parts = line.split()
+                        # Operasyon satırı formatındaysa ilk sütunu (Start) al
+                        if len(parts) >= 3:
+                            route.append(int(parts[0]))
+                    route.append(0) # Depoya geri dönüşü kapat
+                    
+                    if len(set(route)) == parsed_data.num_nodes and len(route) == parsed_data.num_nodes + 1:
+                        parsed_tsp = route
+                        st.sidebar.success(f"✅ Loaded Concorde TSP: {os.path.basename(tsp_path)}")
+                    else:
+                        st.sidebar.error("❌ Mismatch between TSP file and Dataset nodes.")
+                except Exception as e:
+                    st.sidebar.error(f"Error reading TSP file: {e}")
+            else:
+                st.sidebar.warning(f"⚠️ TSP solution not found in '{sol_folder}' folder.")
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Nodes", parsed_data.num_nodes)
         c2.metric("Truck Speed", parsed_data.truck_speed)
@@ -809,7 +828,7 @@ else:
                     pb_h, st_txt_h = st.progress(0), st.empty()
                     
                     start_time = time.time()
-                    sol_h = HGVNS_Engine(parsed_data).run(pb_h, st_txt_h)
+                    sol_h = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb_h, st_txt_h)
                     time_h = time.time() - start_time
                     
                     st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
@@ -872,7 +891,7 @@ else:
                 pb, st_txt = st.progress(0), st.empty()
                 
                 start_time = time.time()
-                sol = HGVNS_Engine(parsed_data).run(pb, st_txt)
+                sol = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb, st_txt)
                 elapsed = time.time() - start_time
                 
                 c1, c2, c3 = st.columns(3)
