@@ -54,6 +54,67 @@ class FSTSP_Parser:
             elif "The Depot" in line:
                 i += 1
                 parts = lines[i].strip().split()
+                self.nodes.append((0, float(parts[0], float(parts[1])))) if len(parts)>=2 else None
+            elif "The Locations" in line:
+                i += 1
+                for j in range(1, self.num_nodes):
+                    if i < len(lines):
+                        parts = lines[i].strip().split()
+                        if len(parts) >= 2:
+                            self.nodes.append((j, float(parts[0]), float(parts[1])))
+                        i += 1
+                break
+            i += 1
+
+    def _build_matrices(self):
+        n = len(self.nodes)
+        t_matrix = np.zeros((n, n))
+        d_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    x1, y1 = self.nodes[i][1], self.nodes[i][2]
+                    x2, y2 = self.nodes[j][1], self.nodes[j][2]
+                    dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    t_matrix[i][j] = dist * self.truck_speed
+                    d_matrix[i][j] = dist * self.drone_speed
+        return t_matrix, d_matrix
+
+# Fallback parser fix if Depot tuple parsing skipped parts
+class FSTSP_Parser:
+    def __init__(self, file_content):
+        self.max_fly = float('inf') 
+        self.novisit_list = []
+        self.truck_speed = 1.0 
+        self.drone_speed = 1.0 
+        self.num_nodes = 0
+        self.nodes = [] 
+        
+        self._parse(file_content)
+        self.truck_time_matrix, self.drone_time_matrix = self._build_matrices()
+
+    def _parse(self, content):
+        lines = content.strip().split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1; continue
+                
+            if line.startswith("#MAXFLY"):
+                val = line.split()[1]
+                self.max_fly = float('inf') if val.lower() == 'infinity' else float(val)
+            elif line.startswith("#NOVISIT"):
+                self.novisit_list.append(int(line.split()[1]))
+            elif "The speed of the Truck" in line:
+                i += 1; self.truck_speed = float(lines[i].strip())
+            elif "The speed of the Drone" in line:
+                i += 1; self.drone_speed = float(lines[i].strip())
+            elif "Number of Nodes" in line:
+                i += 1; self.num_nodes = int(lines[i].strip())
+            elif "The Depot" in line:
+                i += 1
+                parts = lines[i].strip().split()
                 self.nodes.append((0, float(parts[0]), float(parts[1]))) 
             elif "The Locations" in line:
                 i += 1
@@ -266,11 +327,10 @@ class BRKGA_Engine:
     def run(self, progress_bar, status_text, use_2opt, use_3opt, log_console=None):
         population = [self.create_individual() for _ in range(self.p)]
         
-        # Juri/Görselleştirme için başlangıç logları
         if log_console:
             sample_genes = [round(g, 3) for g in population[0]['route'][:6]]
-            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, 0-1 arası (Random Key) kromozomlarla yaratıldı. (Örn 1. Birey: `{sample_genes}...`)")
-            log_console.write("⚙️ **Aşama 2 (Evrim):** DP-Split Decoder ve Turnuva Seçilimi başlıyor...")
+            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, [0, 1] arası Random Key genleriyle yaratıldı. (Örn 1. Birey: `{sample_genes}...`)")
+            log_console.write("⚙️ **Aşama 2 (Evrim & DP-Split):** Popülasyon elitizm ve çaprazlama (crossover) döngüsüne sokuluyor...")
 
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
@@ -278,11 +338,10 @@ class BRKGA_Engine:
         for gen in range(self.max_gen):
             population.sort(key=lambda x: x['fitness'])
             
-            # Yeni en iyi bulunduğunda log bas
             if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
                 best_solution = population[0].copy()
                 if log_console and gen > 0:
-                    log_console.write(f"🔥 **Yeni Optimum (Gen {gen}):** Skor **{best_solution['fitness']:.2f}** seviyesine düştü!")
+                    log_console.write(f"🔥 **Jenerasyon {gen}:** Yeni en iyimakespan skoru **{best_solution['fitness']:.2f}** olarak güncellendi!")
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -307,7 +366,7 @@ class BRKGA_Engine:
             if status_text: status_text.text(f"BRKGA Running... Gen {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
 
         if log_console:
-            log_console.write("✅ **Evrim Tamamlandı!** Maksimum jenerasyona ulaşıldı.")
+            log_console.write("✅ **Evrim Tamamlandı!** Nihai optimum rota seti ve makespan hesaplandı.")
             
         return best_solution
 
@@ -650,14 +709,18 @@ else:
                 with col_b:
                     st.markdown("### 🟦 BRKGA (Memetic)")
                     pb_b, st_txt_b = st.progress(0), st.empty()
-                    log_b = st.expander("🔍 Inside the BRKGA Brain (Live Logs)", expanded=True)
+                    
+                    # Yerleşimi Düzelttik: Önce Harita Placeholder, Altında Canlı Loglar
+                    metric_placeholder_b = st.empty()
+                    map_placeholder_b = st.empty()
+                    log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=True)
                     
                     start_time = time.time()
                     sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt, log_b)
                     time_b = time.time() - start_time
                     
-                    st.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
-                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
+                    metric_placeholder_b.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
+                    map_placeholder_b.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
                     
                 with col_h:
                     st.markdown("### 🟥 HGVNS (Paper Replica)")
@@ -686,7 +749,7 @@ else:
                 c_rep2.info(f"⏱️ **Computation Time**\n\nBRKGA: {time_b:.2f}s | HGVNS: {time_h:.2f}s")
                 c_rep3.info(f"🚁 **Drone Utilization**\n\nBRKGA: {len(sol_b['drone_trips'])} trips | HGVNS: {len(sol_h['drone_trips'])} trips")
                 
-                # --- ROUTE BREAKDOWNS ---
+                # --- ROUTE BREAKDOWNS (ALTA LİSTELENDİ) ---
                 st.write("---")
                 col_r1, col_r2 = st.columns(2)
                 with col_r1:
@@ -707,17 +770,20 @@ else:
             elif solver_type == "BRKGA (Memetic)":
                 st.subheader("🟦 BRKGA Engine Results")
                 pb, st_txt = st.progress(0), st.empty()
-                log_b = st.expander("🔍 Inside the BRKGA Brain (Live Logs)", expanded=True)
+                
+                metric_placeholder = st.empty()
+                map_placeholder = st.empty()
+                log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=True)
                 
                 start_time = time.time()
                 sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb, st_txt, use_2opt, use_3opt, log_b)
                 elapsed = time.time() - start_time
                 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Makespan", f"{sol['fitness']:.2f}")
+                metric_placeholder.metric("Makespan", f"{sol['fitness']:.2f}")
+                c2, c3 = st.columns(2)
                 c2.metric("Time", f"{elapsed:.2f} s")
                 c3.metric("Drone Trips", len(sol['drone_trips']))
-                st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
+                map_placeholder.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
                 
                 st.markdown("#### 📝 Route Details")
                 st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
