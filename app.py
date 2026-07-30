@@ -306,11 +306,11 @@ class BRKGA_Engine:
 # ==========================================
 @njit
 def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, num_nodes, max_fly):
+    """C++ Hızında Maliyet Hesaplama - Kısıtlar Birebir Makaleden"""
     num_t = len(truck_route)
     num_d = len(drone_trips_arr)
 
-    if (num_t - 2 + num_d) != (num_nodes - 1):
-        return np.inf
+    if (num_t - 2 + num_d) != (num_nodes - 1): return np.inf
 
     visited = np.zeros(num_nodes, dtype=np.bool_)
     for i in range(1, num_t - 1):
@@ -344,8 +344,7 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
         l_idx = 0 if l == 0 else idx_map[l]
         r_idx = num_t - 1 if r == 0 else idx_map[r]
 
-        if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
-            return np.inf
+        if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: return np.inf
 
         d_time = d_matrix[l, d_node] + d_matrix[d_node, r]
         if d_time > max_fly: return np.inf
@@ -358,8 +357,7 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
     trip_records = trip_records[sort_idx]
 
     for i in range(num_d - 1):
-        if trip_records[i+1, 0] < trip_records[i, 1]:
-            return np.inf
+        if trip_records[i+1, 0] < trip_records[i, 1]: return np.inf
 
     total_cost = 0.0
     route_idx = 0
@@ -389,20 +387,19 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
 
 
 class HGVNS_Engine:
-    def __init__(self, parsed_data, custom_tsp=None):
+    def __init__(self, parsed_data, time_budget=10, custom_tsp=None):
         self.t = parsed_data.truck_time_matrix
         self.d = parsed_data.drone_time_matrix
         self.num_nodes = parsed_data.num_nodes
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
         self.custom_tsp = custom_tsp
+        self.time_budget = time_budget
 
     def evaluate_cost(self, truck_route, drone_trips):
         t_arr = np.array(truck_route, dtype=np.int32)
-        if not drone_trips:
-            d_arr = np.zeros((0, 3), dtype=np.int32)
-        else:
-            d_arr = np.array(drone_trips, dtype=np.int32)
+        if not drone_trips: d_arr = np.zeros((0, 3), dtype=np.int32)
+        else: d_arr = np.array(drone_trips, dtype=np.int32)
         return numba_evaluate_hgvns_cost(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
 
     def _solve_tsp(self):
@@ -440,12 +437,10 @@ class HGVNS_Engine:
         while improved:
             improved = False
             best_move = None
-            
             for j in range(1, len(truck_route)-1):
                 node = truck_route[j]
                 if node in self.novisit_list: continue
                 if node in truck_nodes_needed: continue 
-                
                 prev_n, next_n = truck_route[j-1], truck_route[j+1]
                 temp_t = truck_route[:j] + truck_route[j+1:]
                 
@@ -467,10 +462,32 @@ class HGVNS_Engine:
                 
         return truck_route, drone_trips
 
+    def get_valid_shake(self, base_t, base_d, k_shake):
+        """Kilitlenmeyi Kıran 'Geçerli Sarsıntı' (Sonsuz ceza yemeyen hamleler bulur)"""
+        shaken_t, shaken_d = base_t.copy(), base_d.copy()
+        for _ in range(k_shake):
+            valid = False
+            for _ in range(20): # 20 rastgele hamle dene
+                temp_t = shaken_t.copy()
+                idx1, idx2 = random.sample(range(1, len(temp_t)-1), 2)
+                temp_t[idx1], temp_t[idx2] = temp_t[idx2], temp_t[idx1]
+                if self.evaluate_cost(temp_t, shaken_d) != float('inf'):
+                    shaken_t = temp_t
+                    valid = True
+                    break
+            
+            # Eğer 20 denemede hala geçerli hamle bulamadıysa, sıkışıklığı açmak için 1 dronu kamyona iade et
+            if not valid and len(shaken_d) > 0:
+                trip = random.choice(shaken_d)
+                shaken_d.remove(trip)
+                insert_idx = random.randint(1, len(shaken_t)-1)
+                shaken_t.insert(insert_idx, trip[1])
+                
+        return shaken_t, shaken_d
+
     def algorithm4_rvnd(self, truck_route, drone_trips):
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
-        
         neighborhoods = [1, 2, 3, 4, 5, 6, 7] 
         random.shuffle(neighborhoods)
         
@@ -627,38 +644,29 @@ class HGVNS_Engine:
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        max_iters = 100
+        start_time = time.time()
         k_max = 5
         k_shake = 1
-        no_improve_count = 0 
         
-        for iter_count in range(max_iters):
-            if progress_bar: progress_bar.progress((iter_count + 1) / max_iters)
-            if status_text: status_text.text(f"HGVNS: Alg 3 & 4 (GVNS Search)... Iter: {iter_count+1}/{max_iters} | Score: {best_cost:.2f}")
+        # BÜYÜK DEĞİŞİM: Sınır tanımayan Time Budget Döngüsü
+        while time.time() - start_time < self.time_budget:
+            elapsed = time.time() - start_time
+            if progress_bar: progress_bar.progress(min(elapsed / self.time_budget, 1.0))
+            if status_text: status_text.text(f"HGVNS: Searching... Time: {elapsed:.1f}s / {self.time_budget}s | Best: {best_cost:.2f}")
             
-            shaken_t, shaken_d = best_t.copy(), best_d.copy()
-            for _ in range(k_shake):
-                if len(shaken_t) <= 3: break
-                idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
-                shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
-            
+            # GEÇERLİ SARSINTI (Feasible Shake)
+            shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
             if new_cost < best_cost - 1e-4:
                 best_cost = new_cost
                 best_t, best_d = new_t, new_d
                 k_shake = 1
-                no_improve_count = 0
             else:
                 k_shake += 1
-                no_improve_count += 1
                 if k_shake > k_max:
                     k_shake = 1
                     
-            if no_improve_count >= 15:
-                if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma (Early Stopping) devreye girdi.")
-                break
-        
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
 
@@ -715,7 +723,8 @@ rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maximum Generation", value=150, min_value=10, max_value=2000)
 
 st.sidebar.divider()
-st.sidebar.header("Advanced / Paper Tricks")
+st.sidebar.header("HGVNS Parameters")
+hgvns_time_budget = st.sidebar.number_input("HGVNS Time Budget (seconds)", value=10, min_value=1, max_value=120)
 use_custom_tsp = st.sidebar.checkbox("Auto-Load Optimal TSP Route (Concorde)", value=True)
 parsed_tsp = None
 
@@ -759,11 +768,8 @@ else:
         with open(os.path.join(dataset_folder, selected_file), 'r', encoding='utf-8') as f:
             parsed_data = FSTSP_Parser(f.read())
             
-        # OTOMATİK TSP DOSYASI OKUMA (Parser) - Çift Klasör Kontrolü!
         if use_custom_tsp:
             base_name = os.path.splitext(selected_file)[0]
-            
-            # Hem ana dizindeki hem de datasets içindeki solutions klasörüne bak!
             possible_folders = ["solutions", os.path.join("datasets", "solutions")]
             sol_folder = None
             for folder in possible_folders:
@@ -772,7 +778,6 @@ else:
                     break
             
             tsp_path = None
-            
             if sol_folder:
                 for ext in [".txt", "", "-tsp.txt", "-tsp"]:
                     temp_path = os.path.join(sol_folder, f"{base_name}-tsp{ext}")
@@ -807,7 +812,7 @@ else:
             else:
                 st.sidebar.warning(f"⚠️ TSP solution not found for {base_name}!")
 
-        # BASELINE TSP HESAPLAMASI VE GÖSTERİMİ
+        # BASELINE TSP HESAPLAMASI
         baseline_tsp_cost = 0.0
         if parsed_tsp:
             for i in range(len(parsed_tsp) - 1):
@@ -847,7 +852,7 @@ else:
                     pb_h, st_txt_h = st.progress(0), st.empty()
                     
                     start_time = time.time()
-                    sol_h = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb_h, st_txt_h)
+                    sol_h = HGVNS_Engine(parsed_data, time_budget=hgvns_time_budget, custom_tsp=parsed_tsp).run(pb_h, st_txt_h)
                     time_h = time.time() - start_time
                     
                     st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
@@ -915,7 +920,7 @@ else:
                 pb, st_txt = st.progress(0), st.empty()
                 
                 start_time = time.time()
-                sol = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb, st_txt)
+                sol = HGVNS_Engine(parsed_data, time_budget=hgvns_time_budget, custom_tsp=parsed_tsp).run(pb, st_txt)
                 elapsed = time.time() - start_time
                 
                 c1, c2, c3 = st.columns(3)
