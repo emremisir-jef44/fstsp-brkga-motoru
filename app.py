@@ -496,7 +496,7 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            if n_idx == 1: # Reinsertion (Kamyon durak kaydırma)
+            if n_idx == 1: # Reinsertion
                 for i in range(1, len(best_t)-1):
                     for j in range(1, len(best_t)):
                         if i == j or i == j-1: continue
@@ -510,7 +510,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
                             
-            elif n_idx == 2: # Or-opt2 (Kamyon 2 komşu durak kaydırma)
+            elif n_idx == 2: # Or-opt2
                 for i in range(1, len(best_t)-2):
                     for j in range(1, len(best_t)):
                         if j in [i, i+1, i+2]: continue
@@ -527,7 +527,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 3: # Exchange (1,1) (Kamyon 1-1 takas)
+            elif n_idx == 3: # Exchange (1,1)
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
@@ -539,7 +539,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 4: # Exchange (2,1) (Kamyon 2-1 takas)
+            elif n_idx == 4: # Exchange (2,1)
                 for i in range(1, len(best_t)-2):
                     for j in range(1, len(best_t)-1):
                         if j == i or j == i+1: continue
@@ -565,7 +565,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 5: # Exchange (2,2) (Kamyon 2-2 takas)
+            elif n_idx == 5: # Exchange (2,2)
                 for i in range(1, len(best_t)-2):
                     for j in range(i+2, len(best_t)-2):
                         new_t = best_t.copy()
@@ -577,7 +577,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 6: # 2-opt (Kamyon segment tersine çevirme)
+            elif n_idx == 6: # 2-opt
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
@@ -588,7 +588,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 7: # Relocate customer (Müşteri atamasını değiştirme: Kamyon <-> Dron)
+            elif n_idx == 7: # Relocate customer
                 # Alt Hamle 1: Kamyondan -> Drona geçir
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
@@ -818,11 +818,18 @@ else:
             else:
                 st.sidebar.warning(f"⚠️ TSP solution not found in '{sol_folder}'.")
 
-        c1, c2, c3, c4 = st.columns(4)
+        # BASELINE TSP HESAPLAMASI VE GÖSTERİMİ
+        baseline_tsp_cost = 0.0
+        if parsed_tsp:
+            for i in range(len(parsed_tsp) - 1):
+                baseline_tsp_cost += parsed_data.truck_time_matrix[parsed_tsp[i]][parsed_tsp[i+1]]
+
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Nodes", parsed_data.num_nodes)
         c2.metric("Truck Speed", parsed_data.truck_speed)
         c3.metric("Drone Speed", parsed_data.drone_speed)
         c4.metric("MAXFLY", "Unlmtd" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
+        c5.metric("🚚 Baseline TSP", f"{baseline_tsp_cost:.2f}" if baseline_tsp_cost > 0 else "N/A")
         
         if st.button("🚀 START OPTIMIZATION", type="primary"):
             st.divider()
@@ -863,7 +870,7 @@ else:
                 gap_val = sol_h['fitness'] - sol_b['fitness']
                 gap_pct = (gap_val / sol_h['fitness']) * 100 if sol_h['fitness'] > 0 else 0
                 
-                c_rep1, c_rep2, c_rep3 = st.columns(3)
+                c_rep1, c_rep2, c_rep3, c_rep4 = st.columns(4)
                 if gap_val > 0:
                     c_rep1.success(f"🏆 **Winner: BRKGA**\n\nOutperformed HGVNS by **{gap_pct:.2f}%**")
                 else:
@@ -871,6 +878,11 @@ else:
                     
                 c_rep2.info(f"⏱️ **Computation Time**\n\nBRKGA: {time_b:.2f}s | HGVNS: {time_h:.2f}s")
                 c_rep3.info(f"🚁 **Drone Utilization**\n\nBRKGA: {len(sol_b['drone_trips'])} trips | HGVNS: {len(sol_h['drone_trips'])} trips")
+                
+                if baseline_tsp_cost > 0:
+                    h_savings = ((baseline_tsp_cost - sol_h['fitness']) / baseline_tsp_cost) * 100
+                    b_savings = ((baseline_tsp_cost - sol_b['fitness']) / baseline_tsp_cost) * 100
+                    c_rep4.info(f"💰 **Savings vs Baseline TSP**\n\nBRKGA: **{b_savings:.1f}%**\n\nHGVNS: **{h_savings:.1f}%**")
                 
                 st.write("---")
                 col_r1, col_r2 = st.columns(2)
