@@ -325,8 +325,6 @@ class HGVNS_Engine:
         self.eval_memo = {} 
 
     def evaluate_cost(self, truck_route, drone_trips):
-        # KUSURSUZ GÜVENLİK KİLİDİ: Müşteri kaybı KESİNLİKLE yasak. 
-        # (Makalede rotadan müşteri düşürülemez kuralı)
         if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
             return float('inf')
 
@@ -349,24 +347,20 @@ class HGVNS_Engine:
             l_idx = idx_map.get(launch, -1)
             r_idx = len(truck_route)-1 if ret == 0 else idx_map.get(ret, -1)
 
-            # Strict Paper Rule: Dron havada geriye uçamaz! (l_idx >= r_idx)
+            # OOM Koruyucu Kalkan: Çakışmaları veya hatalı hamleleri doğrudan engelle, HAFIZAYA YAZMA!
             if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
-                self.eval_memo[state_key] = float('inf')
                 return float('inf')
 
             d_time = self.d[launch][d_node] + self.d[d_node][ret]
             if d_time > self.max_fly:
-                self.eval_memo[state_key] = float('inf')
                 return float('inf')
 
             trip_records.append((l_idx, r_idx, d_time))
 
         trip_records.sort(key=lambda r: r[0])
 
-        # Strict Paper Rule (Prohibition 1 & 2): İki dron aynı anda havada olamaz.
         for idx in range(len(trip_records) - 1):
             if trip_records[idx+1][0] < trip_records[idx][1]:
-                self.eval_memo[state_key] = float('inf')
                 return float('inf')
 
         total_cost = 0.0
@@ -393,11 +387,9 @@ class HGVNS_Engine:
         return total_cost
 
     def _solve_tsp(self):
-        # Concorde TSP Yükleyici Devrede!
         if self.custom_tsp and len(self.custom_tsp) > 2:
             return self.custom_tsp.copy(), []
 
-        # Yedek sistem (Dosya bulunamazsa Nearest Neighbor)
         unvisited = list(range(1, self.num_nodes))
         route = [0]
         curr = 0
@@ -623,7 +615,6 @@ class HGVNS_Engine:
                 idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
                 node1, node2 = shaken_t[idx1], shaken_t[idx2]
                 
-                # Sadece güvenli bir şekilde bağlı dron uçuşlarını kargoya çevir
                 new_d = []
                 for trip in shaken_d:
                     if trip[0] in (node1, node2) or trip[2] in (node1, node2):
@@ -652,6 +643,10 @@ class HGVNS_Engine:
             if no_improve_count >= 15:
                 if status_text: status_text.text("HGVNS: Optimal bulundu, erken durdurma (Early Stopping) devreye girdi.")
                 break
+                
+            # RAM temizleyici: Olası sızıntıları engelle
+            if len(self.eval_memo) > 50000:
+                self.eval_memo.clear()
         
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
@@ -731,7 +726,7 @@ if not available_files:
     st.error("⚠️ 'datasets' folder is empty!")
 else:
     st.write("**Filter by Category:**")
-    category = st.radio("", ["All", "Uniform", "Single Center", "Double Center", "Restricted"], horizontal=True, label_visibility="collapsed")
+    category = st.radio("Category Filter", ["All", "Uniform", "Single Center", "Double Center", "Restricted"], horizontal=True, label_visibility="collapsed")
     
     if category == "All":
         filtered = available_files
@@ -821,18 +816,19 @@ else:
                     time_b = time.time() - start_time
                     
                     metric_placeholder_b.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
-                    map_placeholder_b.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), use_container_width=True)
+                    map_placeholder_b.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_b['truck_route'], sol_b['drone_trips'], "BRKGA"), width="stretch")
                     
                 with col_h:
                     st.markdown("### 🟥 HGVNS (Paper Replica)")
                     pb_h, st_txt_h = st.progress(0), st.empty()
                     
                     start_time = time.time()
+                    # Custom TSP'yi HGVNS motoruna yolla
                     sol_h = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb_h, st_txt_h)
                     time_h = time.time() - start_time
                     
                     st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
-                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_h['truck_route'], sol_h['drone_trips'], "HGVNS"), use_container_width=True)
+                    st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol_h['truck_route'], sol_h['drone_trips'], "HGVNS"), width="stretch")
                 
                 st.divider()
                 st.subheader("📊 Detailed Benchmark Report")
@@ -879,7 +875,7 @@ else:
                 c2, c3 = st.columns(2)
                 c2.metric("Time", f"{elapsed:.2f} s")
                 c3.metric("Drone Trips", len(sol['drone_trips']))
-                map_placeholder.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
+                map_placeholder.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), width="stretch")
                 
                 st.markdown("#### 📝 Route Details")
                 st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
@@ -898,7 +894,7 @@ else:
                 c1.metric("Makespan", f"{sol['fitness']:.2f}")
                 c2.metric("Time", f"{elapsed:.2f} s")
                 c3.metric("Drone Trips", len(sol['drone_trips']))
-                st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "HGVNS"), use_container_width=True)
+                st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "HGVNS"), width="stretch")
                 
                 st.markdown("#### 📝 Route Details")
                 st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
