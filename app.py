@@ -329,52 +329,56 @@ class HGVNS_Engine:
                 cost += self.t[truck_route[i]][truck_route[i+1]]
             return cost
 
-        # HIZLI GÜVENLİK KALKANI: Eğer komşuluk hamleleri rotayı bozduysa ve
-        # .index() aradığı durağı bulamazsa, çökme! Sadece sonsuz (inf) döndür.
         try:
-            sorted_trips = sorted(drone_trips, key=lambda x: truck_route.index(x[0]))
-            
-            # Dron kalkış/iniş çakışma (Prohibition 1 & 2) kontrolü
-            for i in range(len(sorted_trips)-1):
-                t1, t2 = sorted_trips[i], sorted_trips[i+1]
-                idx_t1_ret = truck_route.index(t1[2])
-                idx_t2_launch = truck_route.index(t2[0])
-                if idx_t2_launch < idx_t1_ret: return float('inf')
+            trip_records = []
+            for launch, drone_node, return_node in drone_trips:
+                # KİLİT NOKTA: Depot (0) mantığını çözdük! Başlangıçtaki 0 ile sondaki 0 karışmayacak.
+                launch_idx = 0 if launch == 0 else truck_route.index(launch)
+                return_idx = len(truck_route) - 1 if return_node == 0 else truck_route.index(return_node)
+
+                # Dron rotada geriye doğru uçamaz veya aynı durakta inip kalkamaz (Bekleme hariç)
+                if launch_idx >= return_idx:
+                    return float('inf')
+
+                drone_time = self.d[launch][drone_node] + self.d[drone_node][return_node]
+
+                if drone_time > self.max_fly:
+                    return float('inf')
+
+                trip_records.append((launch_idx, return_idx, drone_time))
+
+            # Uçuşları kalkış sırasına göre diz
+            trip_records.sort(key=lambda r: r[0])
+
+            # PROHIBITION 1 & 2: Kesin çakışma (overlap) ve iç içe geçme yasağı! (Aynı anda 2 dron uçamaz)
+            for idx in range(len(trip_records) - 1):
+                if trip_records[idx+1][0] < trip_records[idx][1]:
+                    return float('inf')
 
             total_cost = 0.0
-            curr_trip_idx = 0
-            i = 0
+            route_idx = 0
+            trip_idx = 0
             
-            while i < len(truck_route) - 1:
-                u = truck_route[i]
-                
-                if curr_trip_idx < len(sorted_trips) and sorted_trips[curr_trip_idx][0] == u:
-                    trip = sorted_trips[curr_trip_idx]
-                    drone_node = trip[1]
-                    return_node = trip[2]
+            while route_idx < len(truck_route) - 1:
+                if trip_idx < len(trip_records) and trip_records[trip_idx][0] == route_idx:
+                    return_idx = trip_records[trip_idx][1]
+                    drone_time = trip_records[trip_idx][2]
                     
-                    ret_idx = truck_route.index(return_node, i + 1)
-                        
                     truck_time = 0.0
-                    for k in range(i, ret_idx):
+                    for k in range(route_idx, return_idx):
                         truck_time += self.t[truck_route[k]][truck_route[k+1]]
                         
-                    drone_time = self.d[u][drone_node] + self.d[drone_node][return_node]
-                    if drone_time > self.max_fly: 
-                        return float('inf')
-                        
                     total_cost += max(truck_time, drone_time)
-                    i = ret_idx
-                    curr_trip_idx += 1
+                    route_idx = return_idx
+                    trip_idx += 1
                 else:
-                    total_cost += self.t[truck_route[i]][truck_route[i+1]]
-                    i += 1
+                    total_cost += self.t[truck_route[route_idx]][truck_route[route_idx+1]]
+                    route_idx += 1
                     
             return total_cost
-
+            
         except ValueError:
-            # Aranılan kalkış (launch) veya iniş (return) noktası rotadan silinmiş.
-            # Rota geçersizdir.
+            # Aranılan durak rotada yoksa, sarsma hamlesi kural dışı bir yer yaratmıştır. Reddet.
             return float('inf')
 
     def _solve_tsp(self):
@@ -435,10 +439,6 @@ class HGVNS_Engine:
                 truck_nodes_needed.add(next_n)
                 improved = True
                 
-        try:
-            drone_trips.sort(key=lambda x: truck_route.index(x[0]))
-        except ValueError:
-            pass
         return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
@@ -625,7 +625,6 @@ class HGVNS_Engine:
         
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
-
 # ==========================================
 # 4. INTERACTIVE MAP (PLOTLY)
 # ==========================================
