@@ -303,7 +303,7 @@ class BRKGA_Engine:
 
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (HARDCORE C++ TACTIC B WITH DYNAMIC REPAIR)
+# 3. MODULE: HGVNS ENGINE (HARDCORE C++ TACTIC B WITH CORRECTED REPAIR)
 # ==========================================
 
 @njit
@@ -388,7 +388,7 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
 
 @njit
 def numba_repair(t_route, d_trips, d_matrix, max_fly):
-    """ZİNCİRLERİ KIRAN C++ TAMİRCİSİ: Bozulan dronları anında kamyona iade eder!"""
+    """HATASI GİDERİLMİŞ TAMİRCİ: Depot(0) kayıplarını ve bozuk eklemeleri engeller."""
     t_out = np.zeros(len(t_route) + len(d_trips), dtype=np.int32)
     d_out = np.zeros((len(d_trips), 3), dtype=np.int32)
     
@@ -402,11 +402,12 @@ def numba_repair(t_route, d_trips, d_matrix, max_fly):
         
     trip_l_idx = np.zeros(len(d_trips), dtype=np.int32)
     for i in range(len(d_trips)):
+        l = d_trips[i, 0]
         idx = -1
         for j in range(t_len):
-            if t_out[j] == d_trips[i, 0]:
+            if t_out[j] == l:
                 idx = j
-                break
+                break # Her zaman ilk bulduğunda dur. (Özellikle 0 için önemlidir)
         trip_l_idx[i] = idx
     
     sort_order = np.argsort(trip_l_idx)
@@ -421,8 +422,8 @@ def numba_repair(t_route, d_trips, d_matrix, max_fly):
         l_idx = -1
         r_idx = -1
         for j in range(t_len):
-            if t_out[j] == l: l_idx = j
-            if t_out[j] == r: r_idx = j
+            if t_out[j] == l and l_idx == -1: l_idx = j # İlk indeks
+            if t_out[j] == r: r_idx = j # Son indeks
             
         is_valid = False
         if l_idx != -1 and r_idx != -1 and l_idx < r_idx:
@@ -438,6 +439,7 @@ def numba_repair(t_route, d_trips, d_matrix, max_fly):
             last_r_idx = r_idx
         else:
             ins = l_idx + 1 if l_idx != -1 else 1
+            if ins >= t_len: ins = t_len - 1 # KUSURSUZLUK DÜZELTMESİ: Asla sondaki 0'ın arkasına ekleme yapma!
             for j in range(t_len - 1, ins - 1, -1):
                 t_out[j+1] = t_out[j]
             t_out[ins] = d_node
@@ -457,9 +459,14 @@ def numba_get_valid_shake(base_t, base_d, k_shake, d_matrix, max_fly):
             idx2 = np.random.randint(1, len(shaken_t)-1)
             shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
         
-        # O sonsuz ceza kilitlenmesi burada çözülüyor!
         shaken_t, shaken_d = numba_repair(shaken_t, shaken_d, d_matrix, max_fly)
     return shaken_t, shaken_d
+
+@njit
+def create_1_array(val):
+    arr = np.zeros(1, dtype=np.int32)
+    arr[0] = val
+    return arr
 
 @njit
 def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_mask):
@@ -476,7 +483,7 @@ def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_m
             for i in range(1, len(best_t)-1):
                 for j in range(1, len(best_t)):
                     if i == j or i == j-1: continue
-                    mid = np.array([best_t[i]], dtype=np.int32)
+                    mid = create_1_array(best_t[i])
                     if i < j: new_t = np.concatenate((best_t[:i], best_t[i+1:j], mid, best_t[j:]))
                     else: new_t = np.concatenate((best_t[:j], mid, best_t[j:i], best_t[i+1:]))
                     
@@ -520,7 +527,7 @@ def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_m
             for i in range(1, len(best_t)-2):
                 for j in range(1, len(best_t)-1):
                     if j == i or j == i+1: continue
-                    mid = np.array([best_t[j]], dtype=np.int32)
+                    mid = create_1_array(best_t[j])
                     if i < j: new_t = np.concatenate((best_t[:i], mid, best_t[i+2:j], best_t[i:i+2], best_t[j+1:]))
                     else: new_t = np.concatenate((best_t[:j], best_t[i:i+2], best_t[j+1:i], mid, best_t[i+2:]))
                         
@@ -559,6 +566,7 @@ def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_m
                 if improved: break
 
         elif n_idx == 7: 
+            # 7.1: Truck -> Drone
             for i in range(1, len(best_t)-1):
                 node = best_t[i]
                 if novisit_mask[node]: continue
@@ -594,6 +602,7 @@ def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_m
             if improved: 
                 k = 0; continue
 
+            # 7.2: Drone -> Truck
             if len(best_d) > 0:
                 for i in range(len(best_d)):
                     temp_d = np.zeros((len(best_d)-1, 3), dtype=np.int32)
@@ -608,7 +617,7 @@ def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_m
                     best_insert_t = best_t
                     best_insert_d = best_d
                     
-                    mid = np.array([node], dtype=np.int32)
+                    mid = create_1_array(node)
                     for j in range(1, len(best_t)):
                         new_t = np.concatenate((best_t[:j], mid, best_t[j:]))
                         rep_t, rep_d = numba_repair(new_t, temp_d, d_matrix, max_fly)
