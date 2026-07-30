@@ -486,7 +486,6 @@ class HGVNS_Engine:
         neighborhoods = [1, 2, 3, 4, 5, 6, 7] 
         random.shuffle(neighborhoods)
         
-        # BURASI MAKALEDEKİ RVND STOPPING CONDITION'DIR (k < 7 olunca durur)
         k = 0
         while k < len(neighborhoods):
             n_idx = neighborhoods[k]
@@ -631,27 +630,46 @@ class HGVNS_Engine:
                 random.shuffle(neighborhoods)
                 k = 0
             else:
-                k += 1 # Stopping Condition'a doğru yaklaş
+                k += 1
                 
         return best_t, best_d, best_cost
 
-    def run(self, progress_bar, status_text):
+    def run(self, progress_bar, status_text, stop_type, stop_val):
         if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde Initial & Global Savings)...")
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # SAF ALGORİTMİK DURMA KOŞULU PARAMETRELERİ (Zaman kısıtı YOK)
-        max_iters = 500  # En fazla denenecek iterasyon (Önlem amaçlı üst sınır)
-        max_no_improve = 25  # Asıl Stopping Condition: Art arda 25 iterasyon gelişme olmazsa DUR.
-        
         k_max = 5
         k_shake = 1
         no_improve_count = 0
+        iter_count = 0
+        start_time = time.time()
         
-        for iter_count in range(max_iters):
-            if progress_bar: progress_bar.progress(min(iter_count / max_iters, 1.0))
-            if status_text: status_text.text(f"HGVNS: RVND Search... Iter: {iter_count} | No Improve: {no_improve_count}/{max_no_improve} | Best: {best_cost:.2f}")
+        while True:
+            elapsed = time.time() - start_time
             
+            # KULLANICININ SEÇTİĞİ DİNAMİK STOPPING CONDITION KONTROLLERİ
+            if stop_type == "Max Iterations" and iter_count >= stop_val:
+                break
+            if stop_type == "Time Budget (sec)" and elapsed >= stop_val:
+                break
+            if stop_type == "No Improvement Iters" and no_improve_count >= stop_val:
+                break
+            if iter_count >= 10000: # Güvenlik amaçlı hard limit (Sonsuz döngüyü engeller)
+                break
+                
+            # PROGRESS BAR GÜNCELLEMESİ (Seçilen Koşula Göre)
+            if progress_bar:
+                if stop_type == "Max Iterations":
+                    progress_bar.progress(min(iter_count / stop_val, 1.0))
+                elif stop_type == "Time Budget (sec)":
+                    progress_bar.progress(min(elapsed / stop_val, 1.0))
+                else:
+                    progress_bar.progress(min(no_improve_count / stop_val, 1.0))
+            
+            if status_text: 
+                status_text.text(f"HGVNS Search... Iter: {iter_count} | No Improve: {no_improve_count} | Best: {best_cost:.2f}")
+
             shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
@@ -659,18 +677,16 @@ class HGVNS_Engine:
                 best_cost = new_cost
                 best_t, best_d = new_t, new_d
                 k_shake = 1
-                no_improve_count = 0 # Rekor kırılırsa sayacı SIFIRLA
+                no_improve_count = 0
             else:
                 k_shake += 1
-                no_improve_count += 1 # Rekor kırılamazsa sayacı ARTIR
+                no_improve_count += 1
                 if k_shake > k_max:
                     k_shake = 1
-            
-            # DIŞ DÖNGÜ (GVNS) İÇİN STOPPING CONDITION (Gelişmesiz geçen turlar sınırı aştı mı?)
-            if no_improve_count >= max_no_improve:
-                if status_text: status_text.text(f"HGVNS: Algorithmic Stopping Condition Met ({max_no_improve} iters no improve).")
-                break
                     
+            iter_count += 1
+            
+        if progress_bar: progress_bar.progress(1.0)
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
 
@@ -725,6 +741,16 @@ elite_ratio = st.sidebar.slider("Elite Ratio (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maximum Generation", value=150, min_value=10, max_value=2000)
+
+st.sidebar.divider()
+st.sidebar.header("HGVNS Parameters")
+hgvns_stop_type = st.sidebar.radio("Stopping Condition", ["Max Iterations", "Time Budget (sec)", "No Improvement Iters"])
+if hgvns_stop_type == "Max Iterations":
+    hgvns_stop_val = st.sidebar.number_input("Max Iterations limit", value=100, min_value=1, step=10)
+elif hgvns_stop_type == "Time Budget (sec)":
+    hgvns_stop_val = st.sidebar.number_input("Time Budget limit", value=10, min_value=1, step=1)
+else:
+    hgvns_stop_val = st.sidebar.number_input("No-Improvement limit", value=25, min_value=1, step=5)
 
 st.sidebar.divider()
 st.sidebar.header("Advanced / Paper Tricks")
@@ -854,7 +880,7 @@ else:
                     pb_h, st_txt_h = st.progress(0), st.empty()
                     
                     start_time = time.time()
-                    sol_h = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb_h, st_txt_h)
+                    sol_h = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb_h, st_txt_h, hgvns_stop_type, hgvns_stop_val)
                     time_h = time.time() - start_time
                     
                     st.metric("HGVNS Makespan", f"{sol_h['fitness']:.2f}", f"{time_h:.2f} s", delta_color="off")
@@ -922,7 +948,7 @@ else:
                 pb, st_txt = st.progress(0), st.empty()
                 
                 start_time = time.time()
-                sol = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb, st_txt)
+                sol = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb, st_txt, hgvns_stop_type, hgvns_stop_val)
                 elapsed = time.time() - start_time
                 
                 c1, c2, c3 = st.columns(3)
