@@ -268,11 +268,6 @@ class BRKGA_Engine:
     def run(self, progress_bar, status_text, use_2opt, use_3opt, log_console=None):
         population = [self.create_individual() for _ in range(self.p)]
         
-        if log_console:
-            sample_genes = [round(g, 3) for g in population[0]['route'][:6]]
-            log_console.write(f"🧬 **Aşama 1 (Başlangıç):** {self.p} adet birey, [0, 1] arası Random Key genleriyle yaratıldı. (Örn: `{sample_genes}...`)")
-            log_console.write("⚙️ **Aşama 2 (Evrim & DP-Split):** Popülasyon elitizm ve çaprazlama döngüsüne sokuluyor...")
-
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
 
@@ -281,8 +276,6 @@ class BRKGA_Engine:
             
             if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
                 best_solution = population[0].copy()
-                if log_console and gen > 0:
-                    log_console.write(f"🔥 **Jenerasyon {gen}:** Yeni optimum makespan skoru **{best_solution['fitness']:.2f}** bulundu!")
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -305,9 +298,6 @@ class BRKGA_Engine:
             population = next_gen
             if progress_bar: progress_bar.progress((gen + 1) / self.max_gen)
             if status_text: status_text.text(f"BRKGA Running... Gen {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
-
-        if log_console:
-            log_console.write("✅ **Evrim Tamamlandı!** Nihai optimum rota seti hesaplandı.")
             
         return best_solution
 
@@ -316,10 +306,6 @@ class BRKGA_Engine:
 # ==========================================
 @njit
 def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, num_nodes, max_fly):
-    """
-    Paper kısıtlarını IŞIK HIZINDA kontrol eden C++ derlemeli fonksiyon.
-    Her müşteri 1 kez ziyaret edilmeli, çakışma olmamalı, C_q = max(Truck, Drone).
-    """
     num_t = len(truck_route)
     num_d = len(drone_trips_arr)
 
@@ -371,7 +357,6 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
     sort_idx = np.argsort(trip_records[:, 0])
     trip_records = trip_records[sort_idx]
 
-    # Drone operasyonları çakışamaz kısıtı (Prohibition 1 & 2)
     for i in range(num_d - 1):
         if trip_records[i+1, 0] < trip_records[i, 1]:
             return np.inf
@@ -389,7 +374,6 @@ def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, 
             for k in range(route_idx, return_idx):
                 truck_time += t_matrix[truck_route[k], truck_route[k+1]]
 
-            # C_q = max(T_truck, T_drone) formülü
             if truck_time > drone_time:
                 total_cost += truck_time
             else:
@@ -487,7 +471,6 @@ class HGVNS_Engine:
         best_t, best_d = truck_route.copy(), drone_trips.copy()
         best_cost = self.evaluate_cost(best_t, best_d)
         
-        # PAPER REPLICA: Tam olarak 7 komşuluk yapısı kullanıldı.
         neighborhoods = [1, 2, 3, 4, 5, 6, 7] 
         random.shuffle(neighborhoods)
         
@@ -496,7 +479,7 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            if n_idx == 1: # Reinsertion
+            if n_idx == 1: 
                 for i in range(1, len(best_t)-1):
                     for j in range(1, len(best_t)):
                         if i == j or i == j-1: continue
@@ -510,7 +493,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
                             
-            elif n_idx == 2: # Or-opt2
+            elif n_idx == 2: 
                 for i in range(1, len(best_t)-2):
                     for j in range(1, len(best_t)):
                         if j in [i, i+1, i+2]: continue
@@ -527,7 +510,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 3: # Exchange (1,1)
+            elif n_idx == 3: 
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t.copy()
@@ -539,7 +522,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 4: # Exchange (2,1)
+            elif n_idx == 4: 
                 for i in range(1, len(best_t)-2):
                     for j in range(1, len(best_t)-1):
                         if j == i or j == i+1: continue
@@ -565,7 +548,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 5: # Exchange (2,2)
+            elif n_idx == 5: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+2, len(best_t)-2):
                         new_t = best_t.copy()
@@ -577,7 +560,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 6: # 2-opt
+            elif n_idx == 6: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
@@ -588,8 +571,7 @@ class HGVNS_Engine:
                             break
                     if improved: break
 
-            elif n_idx == 7: # Relocate customer
-                # Alt Hamle 1: Kamyondan -> Drona geçir
+            elif n_idx == 7: 
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
                     if node in self.novisit_list: continue
@@ -615,7 +597,6 @@ class HGVNS_Engine:
                     k = 0
                     continue
 
-                # Alt Hamle 2: Drondan -> Kamyona geçir
                 if len(best_d) > 0:
                     for i, trip in enumerate(best_d):
                         temp_d = best_d[:i] + best_d[i+1:]
@@ -778,13 +759,21 @@ else:
         with open(os.path.join(dataset_folder, selected_file), 'r', encoding='utf-8') as f:
             parsed_data = FSTSP_Parser(f.read())
             
-        # OTOMATİK TSP DOSYASI OKUMA (Parser) - "datasets/solutions" Klasöründen!
+        # OTOMATİK TSP DOSYASI OKUMA (Parser) - Çift Klasör Kontrolü!
         if use_custom_tsp:
             base_name = os.path.splitext(selected_file)[0]
-            sol_folder = os.path.join("datasets", "solutions")
+            
+            # Hem ana dizindeki hem de datasets içindeki solutions klasörüne bak!
+            possible_folders = ["solutions", os.path.join("datasets", "solutions")]
+            sol_folder = None
+            for folder in possible_folders:
+                if os.path.exists(folder):
+                    sol_folder = folder
+                    break
+            
             tsp_path = None
             
-            if os.path.exists(sol_folder):
+            if sol_folder:
                 for ext in [".txt", "", "-tsp.txt", "-tsp"]:
                     temp_path = os.path.join(sol_folder, f"{base_name}-tsp{ext}")
                     if os.path.exists(temp_path):
@@ -816,7 +805,7 @@ else:
                 except Exception as e:
                     st.sidebar.error(f"Error reading TSP file: {e}")
             else:
-                st.sidebar.warning(f"⚠️ TSP solution not found in '{sol_folder}'.")
+                st.sidebar.warning(f"⚠️ TSP solution not found for {base_name}!")
 
         # BASELINE TSP HESAPLAMASI VE GÖSTERİMİ
         baseline_tsp_cost = 0.0
