@@ -433,20 +433,41 @@ else:
 if not available_files:
     st.error(f"⚠️ '{dataset_folder}' folder not found or contains no .txt files!")
 else:
-    selected_file = st.selectbox("Select the dataset you want to run:", available_files)
+    # --- YENİ İKİ AŞAMALI FİLTRELEME SİSTEMİ ---
+    st.write("**Filter by Dataset Type:**")
+    category_options = ["All", "Uniform", "Single Center", "Double Center", "Restricted"]
+    selected_category = st.radio("", category_options, horizontal=True, label_visibility="collapsed")
     
-    file_path = os.path.join(dataset_folder, selected_file)
-    with open(file_path, 'r', encoding='utf-8') as f:
-        file_content = f.read()
+    # Dosya ismindeki anahtar kelimelere göre anlık filtreleme
+    if selected_category == "Uniform":
+        filtered_files = [f for f in available_files if "uniform" in f.lower()]
+    elif selected_category == "Single Center":
+        filtered_files = [f for f in available_files if "single" in f.lower()]
+    elif selected_category == "Double Center":
+        filtered_files = [f for f in available_files if "double" in f.lower()]
+    elif selected_category == "Restricted":
+        filtered_files = [f for f in available_files if "maxradius" in f.lower() or "novisit" in f.lower()]
+    else:
+        filtered_files = available_files # All seçilirse hepsini göster
+        
+    if not filtered_files:
+        st.warning(f"⚠️ No files found for the '{selected_category}' category.")
+    else:
+        # İkinci Aşama: Sadece filtrelenmiş dosyaları göster
+        selected_file = st.selectbox(f"Select a dataset ({len(filtered_files)} files available):", filtered_files)
+        
+        file_path = os.path.join(dataset_folder, selected_file)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
 
-    parsed_data = FSTSP_Parser(file_content)
-    st.success(f"✅ {selected_file} loaded successfully!")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Nodes", parsed_data.num_nodes)
-    col2.metric("Truck Speed Multiplier", parsed_data.truck_speed)
-    col3.metric("Drone Speed Multiplier", parsed_data.drone_speed)
-    col4.metric("Drone Battery (MAXFLY)", "Unlimited" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
+        parsed_data = FSTSP_Parser(file_content)
+        st.success(f"✅ {selected_file} loaded successfully!")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Nodes", parsed_data.num_nodes)
+        col2.metric("Truck Speed Multiplier", parsed_data.truck_speed)
+        col3.metric("Drone Speed Multiplier", parsed_data.drone_speed)
+        col4.metric("Drone Battery (MAXFLY)", "Unlimited" if parsed_data.max_fly == float('inf') else parsed_data.max_fly)
     
     if st.button("🚀 Start Optimization Engine"):
         progress_bar = st.progress(0)
