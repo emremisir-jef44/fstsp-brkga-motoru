@@ -428,33 +428,35 @@ class HGVNS_Engine:
     def algorithm2_initial_solution(self):
         truck_route, drone_trips = self._solve_tsp()
         improved = True
-        truck_nodes_needed = set([0])
         best_c = self.evaluate_cost(truck_route, drone_trips)
         
         while improved:
             improved = False
             best_move = None
+            
             for j in range(1, len(truck_route)-1):
                 node = truck_route[j]
                 if node in self.novisit_list: continue
-                if node in truck_nodes_needed: continue 
-                prev_n, next_n = truck_route[j-1], truck_route[j+1]
+                
                 temp_t = truck_route[:j] + truck_route[j+1:]
                 
-                drone_trips.append((prev_n, node, next_n))
-                c = self.evaluate_cost(temp_t, drone_trips)
-                drone_trips.pop()
-                
-                if c < best_c:
-                    best_c = c
-                    best_move = (node, prev_n, next_n)
+                # 1. ÇÖZÜM: Tüm olası drone kombinasyonlarını tara, dar görüşlü olma!
+                for l_idx in range(len(temp_t)-1):
+                    for r_idx in range(l_idx+1, len(temp_t)):
+                        prev_n, next_n = temp_t[l_idx], temp_t[r_idx]
+                        
+                        if self.d[prev_n][node] + self.d[node][next_n] > self.max_fly: continue
+                        
+                        cand_d = drone_trips.copy()
+                        cand_d.append((prev_n, node, next_n))
+                        
+                        c = self.evaluate_cost(temp_t, cand_d)
+                        if c < best_c:
+                            best_c = c
+                            best_move = (temp_t, cand_d)
                     
             if best_move:
-                node, prev_n, next_n = best_move
-                truck_route.remove(node)
-                drone_trips.append((prev_n, node, next_n))
-                truck_nodes_needed.add(prev_n) 
-                truck_nodes_needed.add(next_n)
+                truck_route, drone_trips = best_move
                 improved = True
                 
         return truck_route, drone_trips
@@ -462,21 +464,19 @@ class HGVNS_Engine:
     def get_valid_shake(self, base_t, base_d, k_shake):
         shaken_t, shaken_d = base_t.copy(), base_d.copy()
         for _ in range(k_shake):
-            valid = False
-            for _ in range(20): 
-                temp_t = shaken_t.copy()
-                idx1, idx2 = random.sample(range(1, len(temp_t)-1), 2)
-                temp_t[idx1], temp_t[idx2] = temp_t[idx2], temp_t[idx1]
-                if self.evaluate_cost(temp_t, shaken_d) != float('inf'):
-                    shaken_t = temp_t
-                    valid = True
-                    break
-            
-            if not valid and len(shaken_d) > 0:
+            # 3. ÇÖZÜM: Sarsıntı kilitlenmesini engellemek için bazen dron uçuşlarını kamyona indir
+            if len(shaken_d) > 0 and random.random() < 0.5:
                 trip = random.choice(shaken_d)
                 shaken_d.remove(trip)
-                insert_idx = random.randint(1, len(shaken_t)-1)
-                shaken_t.insert(insert_idx, trip[1])
+                shaken_t.insert(random.randint(1, len(shaken_t)-1), trip[1])
+                
+            idx1, idx2 = random.sample(range(1, len(shaken_t)-1), 2)
+            shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
+            
+            # Kural dışı dron ataması kalırsa, hepsini güvenlice kamyona döndür
+            while self.evaluate_cost(shaken_t, shaken_d) == float('inf') and len(shaken_d) > 0:
+                trip = shaken_d.pop(0)
+                shaken_t.insert(random.randint(1, len(shaken_t)-1), trip[1])
                 
         return shaken_t, shaken_d
 
@@ -584,6 +584,7 @@ class HGVNS_Engine:
                     if improved: break
 
             elif n_idx == 7: 
+                # 7. Komşuluk Alt Hamle 1: Kamyondan -> Drona
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
                     if node in self.novisit_list: continue
@@ -591,8 +592,7 @@ class HGVNS_Engine:
                     best_insert_c = float('inf')
                     best_insert_d = best_d
                     for l_idx in range(len(temp_t)-1):
-                        limit = min(l_idx + 15, len(temp_t))
-                        for r_idx in range(l_idx+1, limit):
+                        for r_idx in range(l_idx+1, len(temp_t)):
                             l_cand, r_cand = temp_t[l_idx], temp_t[r_idx]
                             if self.d[l_cand][node] + self.d[node][r_cand] > self.max_fly: continue
                             cand_d = best_d.copy()
@@ -609,6 +609,7 @@ class HGVNS_Engine:
                     k = 0
                     continue
 
+                # 7. Komşuluk Alt Hamle 2: Drondan -> Kamyona
                 if len(best_d) > 0:
                     for i, trip in enumerate(best_d):
                         temp_d = best_d[:i] + best_d[i+1:]
@@ -623,6 +624,31 @@ class HGVNS_Engine:
                                 best_insert_t = new_t
                         if best_insert_c < best_cost:
                             best_cost, best_t, best_d = best_insert_c, best_insert_t, temp_d
+                            improved = True
+                            break
+                if improved:
+                    k = 0
+                    continue
+                
+                # 2. ÇÖZÜM: N7 Komşuluğu Alt Hamle 3: Drone -> Drone Kaydırma
+                if len(best_d) > 0:
+                    for i, trip in enumerate(best_d):
+                        temp_d = best_d[:i] + best_d[i+1:]
+                        node = trip[1]
+                        best_insert_c = float('inf')
+                        best_insert_d = best_d
+                        for l_idx in range(len(best_t)-1):
+                            for r_idx in range(l_idx+1, len(best_t)):
+                                l_cand, r_cand = best_t[l_idx], best_t[r_idx]
+                                if self.d[l_cand][node] + self.d[node][r_cand] > self.max_fly: continue
+                                cand_d = temp_d.copy()
+                                cand_d.append((l_cand, node, r_cand))
+                                c = self.evaluate_cost(best_t, cand_d)
+                                if c < best_insert_c:
+                                    best_insert_c = c
+                                    best_insert_d = cand_d
+                        if best_insert_c < best_cost:
+                            best_cost, best_d = best_insert_c, best_insert_d
                             improved = True
                             break
 
@@ -648,17 +674,15 @@ class HGVNS_Engine:
         while True:
             elapsed = time.time() - start_time
             
-            # KULLANICININ SEÇTİĞİ DİNAMİK STOPPING CONDITION KONTROLLERİ
             if stop_type == "Max Iterations" and iter_count >= stop_val:
                 break
             if stop_type == "Time Budget (sec)" and elapsed >= stop_val:
                 break
             if stop_type == "No Improvement Iters" and no_improve_count >= stop_val:
                 break
-            if iter_count >= 10000: # Güvenlik amaçlı hard limit (Sonsuz döngüyü engeller)
+            if iter_count >= 10000: 
                 break
                 
-            # PROGRESS BAR GÜNCELLEMESİ (Seçilen Koşula Göre)
             if progress_bar:
                 if stop_type == "Max Iterations":
                     progress_bar.progress(min(iter_count / stop_val, 1.0))
