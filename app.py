@@ -7,7 +7,6 @@ import random
 import time
 import os
 import re
-import copy
 
 # ==========================================
 # NUMBA CHECK (FOR C++ LEVEL SPEED)
@@ -114,8 +113,7 @@ def fast_3opt_relocation(route, t_matrix):
         iters += 1
         for i in range(1, n - 1):
             for j in range(1, n - 1):
-                if i == j or i == j - 1:
-                    continue
+                if i == j or i == j - 1: continue
                 prev_i = best_route[i-1]
                 node_i = best_route[i]
                 next_i = best_route[i+1]
@@ -136,8 +134,7 @@ def fast_3opt_relocation(route, t_matrix):
                     best_route = new_route
                     improved = True
                     break 
-            if improved:
-                break
+            if improved: break
     return best_route
 
 @njit
@@ -155,7 +152,6 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
     cost[0] = 0.0
     path_prev = np.zeros(N, dtype=np.int32)
     path_drone = np.full(N, -1, dtype=np.int32)
-
     WINDOW_SIZE = 12
     pure_t = np.zeros(N)
 
@@ -313,28 +309,57 @@ class HGVNS_Engine:
         self.novisit_list = parsed_data.novisit_list
 
     def evaluate_cost(self, truck_route, drone_trips):
-        launch_nodes = set(t[0] for t in drone_trips)
-        return_nodes = set(t[2] for t in drone_trips)
-        
-        for i in range(len(drone_trips)-1):
-            t1, t2 = drone_trips[i], drone_trips[i+1]
-            try:
-                idx_t1_ret = truck_route.index(t1[2])
-                idx_t2_launch = truck_route.index(t2[0])
-                if idx_t2_launch < idx_t1_ret: return float('inf')
-            except ValueError:
+        # 1. Hata Engelleme: Tüm dron kalkış/iniş noktaları kamyon rotasında mevcut mu?
+        for trip in drone_trips:
+            if trip[0] not in truck_route or trip[2] not in truck_route:
                 return float('inf')
 
+        # Dron uçuşlarını kamyon rotasındaki ilerleyiş sırasına göre diz
+        try:
+            sorted_trips = sorted(drone_trips, key=lambda x: truck_route.index(x[0]))
+        except ValueError:
+            return float('inf')
+
+        # 2. Makale Kısıtları (Prohibition 1 & 2): Uçuşlar iç içe geçemez veya çakışamaz
+        for i in range(len(sorted_trips)-1):
+            t1, t2 = sorted_trips[i], sorted_trips[i+1]
+            idx_t1_ret = truck_route.index(t1[2])
+            idx_t2_launch = truck_route.index(t2[0])
+            if idx_t2_launch < idx_t1_ret: return float('inf')
+
         total_cost = 0.0
-        for i in range(len(truck_route) - 1):
-            u, v = truck_route[i], truck_route[i+1]
-            truck_time = self.t[u][v]
-            drone_time = 0.0
-            for trip in drone_trips:
-                if trip[0] == u and trip[2] == v:
-                    drone_time = self.d[u][trip[1]] + self.d[trip[1]][v]
-                    if drone_time > self.max_fly: return float('inf')
-            total_cost += max(truck_time, drone_time)
+        curr_trip_idx = 0
+        i = 0
+        
+        # 3. Makale Denklem (1): Kamyon rotasını alt-rotalara (subroutes) bölerek hesaplama
+        while i < len(truck_route) - 1:
+            u = truck_route[i]
+            
+            if curr_trip_idx < len(sorted_trips) and sorted_trips[curr_trip_idx][0] == u:
+                trip = sorted_trips[curr_trip_idx]
+                drone_node = trip[1]
+                return_node = trip[2]
+                
+                try:
+                    ret_idx = truck_route.index(return_node, i + 1)
+                except ValueError:
+                    return float('inf')
+                    
+                truck_time = 0.0
+                for k in range(i, ret_idx):
+                    truck_time += self.t[truck_route[k]][truck_route[k+1]]
+                    
+                drone_time = self.d[u][drone_node] + self.d[drone_node][return_node]
+                if drone_time > self.max_fly: 
+                    return float('inf')
+                    
+                total_cost += max(truck_time, drone_time)
+                i = ret_idx
+                curr_trip_idx += 1
+            else:
+                total_cost += self.t[truck_route[i]][truck_route[i+1]]
+                i += 1
+                
         return total_cost
 
     def _solve_tsp(self):
@@ -353,6 +378,10 @@ class HGVNS_Engine:
         truck_route, drone_trips = self._solve_tsp()
         improved = True
         
+        # NODE LOCKING: Dron kalkış veya iniş noktası olarak seçilen düğümler KİLİTLENİR.
+        truck_nodes_needed = set()
+        truck_nodes_needed.add(0)
+        
         while improved:
             improved = False
             best_saving = 0
@@ -361,8 +390,10 @@ class HGVNS_Engine:
             for j in range(1, len(truck_route)-1):
                 node = truck_route[j]
                 if node in self.novisit_list: continue
+                if node in truck_nodes_needed: continue # Kilitli düğümler silinemez!
                 
                 prev_n, next_n = truck_route[j-1], truck_route[j+1]
+                
                 t_cost_with = self.t[prev_n][node] + self.t[node][next_n]
                 t_cost_without = self.t[prev_n][next_n]
                 
@@ -371,20 +402,24 @@ class HGVNS_Engine:
                 
                 saving = t_cost_with - max(t_cost_without, d_time)
                 
+                # Güvenlik Kontrolü: Bu uçuşu eklersek kuralları bozar mı?
                 if saving > best_saving:
-                    best_saving = saving
-                    best_move = (j, node, prev_n, next_n)
+                    temp_t = truck_route.copy()
+                    temp_t.pop(j)
+                    temp_d = drone_trips + [(prev_n, node, next_n)]
+                    if self.evaluate_cost(temp_t, temp_d) != float('inf'):
+                        best_saving = saving
+                        best_move = (j, node, prev_n, next_n)
                     
             if best_saving > 0:
                 j, node, prev_n, next_n = best_move
                 truck_route.pop(j)
                 drone_trips.append((prev_n, node, next_n))
+                truck_nodes_needed.add(prev_n) # Uçuş eklendi, durakları kilitle!
+                truck_nodes_needed.add(next_n)
                 improved = True
                 
-        # Hata Fix: truck_route'dan silinenleri indexle aramaya çalışma, orijinal sıralamaya göre diz
-        # Bu makaledeki sırayı koruyarak dizilimi sağlar.
-        original_tsp, _ = self._solve_tsp()
-        drone_trips.sort(key=lambda x: original_tsp.index(x[0]))
+        drone_trips.sort(key=lambda x: truck_route.index(x[0]))
         return truck_route, drone_trips
 
     def algorithm4_rvnd(self, truck_route, drone_trips):
