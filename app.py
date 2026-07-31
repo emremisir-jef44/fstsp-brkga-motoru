@@ -303,343 +303,8 @@ class BRKGA_Engine:
 
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (HARDCORE C++ TACTIC B WITH CORRECTED REPAIR)
+# 3. MODULE: HGVNS ENGINE (CLEAN & FAST PYTHON)
 # ==========================================
-
-@njit
-def numba_evaluate_hgvns_cost(truck_route, drone_trips_arr, t_matrix, d_matrix, num_nodes, max_fly):
-    num_t = len(truck_route)
-    num_d = len(drone_trips_arr)
-
-    if (num_t - 2 + num_d) != (num_nodes - 1): return np.inf
-
-    visited = np.zeros(num_nodes, dtype=np.bool_)
-    for i in range(1, num_t - 1):
-        if visited[truck_route[i]]: return np.inf
-        visited[truck_route[i]] = True
-
-    for i in range(num_d):
-        visit = int(drone_trips_arr[i, 1])
-        if visited[visit]: return np.inf
-        visited[visit] = True
-
-    idx_map = np.full(num_nodes, -1, dtype=np.int32)
-    for i in range(num_t):
-        node = truck_route[i]
-        if node != 0:
-            idx_map[node] = i
-    idx_map[0] = 0 
-
-    if num_d == 0:
-        cost = 0.0
-        for i in range(num_t - 1):
-            cost += t_matrix[truck_route[i], truck_route[i+1]]
-        return cost
-
-    trip_records = np.zeros((num_d, 3), dtype=np.float64)
-    for i in range(num_d):
-        l = int(drone_trips_arr[i, 0])
-        d_node = int(drone_trips_arr[i, 1])
-        r = int(drone_trips_arr[i, 2])
-
-        l_idx = 0 if l == 0 else idx_map[l]
-        r_idx = num_t - 1 if r == 0 else idx_map[r]
-
-        if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: return np.inf
-
-        d_time = d_matrix[l, d_node] + d_matrix[d_node, r]
-        if d_time > max_fly: return np.inf
-
-        trip_records[i, 0] = float(l_idx)
-        trip_records[i, 1] = float(r_idx)
-        trip_records[i, 2] = d_time
-
-    sort_idx = np.argsort(trip_records[:, 0])
-    trip_records = trip_records[sort_idx]
-
-    for i in range(num_d - 1):
-        if trip_records[i+1, 0] < trip_records[i, 1]: return np.inf
-
-    total_cost = 0.0
-    route_idx = 0
-    trip_idx = 0
-
-    while route_idx < num_t - 1:
-        if trip_idx < num_d and trip_records[trip_idx, 0] == route_idx:
-            return_idx = int(trip_records[trip_idx, 1])
-            drone_time = trip_records[trip_idx, 2]
-
-            truck_time = 0.0
-            for k in range(route_idx, return_idx):
-                truck_time += t_matrix[truck_route[k], truck_route[k+1]]
-
-            if truck_time > drone_time:
-                total_cost += truck_time
-            else:
-                total_cost += drone_time
-
-            route_idx = return_idx
-            trip_idx += 1
-        else:
-            total_cost += t_matrix[truck_route[route_idx], truck_route[route_idx+1]]
-            route_idx += 1
-
-    return total_cost
-
-@njit
-def numba_repair(t_route, d_trips, d_matrix, max_fly):
-    """HATASI GİDERİLMİŞ TAMİRCİ: Depot(0) kayıplarını ve bozuk eklemeleri engeller."""
-    t_out = np.zeros(len(t_route) + len(d_trips), dtype=np.int32)
-    d_out = np.zeros((len(d_trips), 3), dtype=np.int32)
-    
-    t_len = len(t_route)
-    for i in range(t_len):
-        t_out[i] = t_route[i]
-        
-    d_count = 0
-    if len(d_trips) == 0:
-        return t_out[:t_len], d_out[:d_count]
-        
-    trip_l_idx = np.zeros(len(d_trips), dtype=np.int32)
-    for i in range(len(d_trips)):
-        l = d_trips[i, 0]
-        idx = -1
-        for j in range(t_len):
-            if t_out[j] == l:
-                idx = j
-                break # Her zaman ilk bulduğunda dur. (Özellikle 0 için önemlidir)
-        trip_l_idx[i] = idx
-    
-    sort_order = np.argsort(trip_l_idx)
-    last_r_idx = -1
-    
-    for k in range(len(d_trips)):
-        i = sort_order[k]
-        l = d_trips[i, 0]
-        d_node = d_trips[i, 1]
-        r = d_trips[i, 2]
-        
-        l_idx = -1
-        r_idx = -1
-        for j in range(t_len):
-            if t_out[j] == l and l_idx == -1: l_idx = j # İlk indeks
-            if t_out[j] == r: r_idx = j # Son indeks
-            
-        is_valid = False
-        if l_idx != -1 and r_idx != -1 and l_idx < r_idx:
-            if d_matrix[l, d_node] + d_matrix[d_node, r] <= max_fly:
-                if l_idx >= last_r_idx:
-                    is_valid = True
-                    
-        if is_valid:
-            d_out[d_count, 0] = l
-            d_out[d_count, 1] = d_node
-            d_out[d_count, 2] = r
-            d_count += 1
-            last_r_idx = r_idx
-        else:
-            ins = l_idx + 1 if l_idx != -1 else 1
-            if ins >= t_len: ins = t_len - 1 # KUSURSUZLUK DÜZELTMESİ: Asla sondaki 0'ın arkasına ekleme yapma!
-            for j in range(t_len - 1, ins - 1, -1):
-                t_out[j+1] = t_out[j]
-            t_out[ins] = d_node
-            t_len += 1
-            if last_r_idx >= ins:
-                last_r_idx += 1
-                
-    return t_out[:t_len], d_out[:d_count]
-
-@njit
-def numba_get_valid_shake(base_t, base_d, k_shake, d_matrix, max_fly):
-    shaken_t = base_t.copy()
-    shaken_d = base_d.copy()
-    for _ in range(k_shake):
-        if len(shaken_t) > 3:
-            idx1 = np.random.randint(1, len(shaken_t)-1)
-            idx2 = np.random.randint(1, len(shaken_t)-1)
-            shaken_t[idx1], shaken_t[idx2] = shaken_t[idx2], shaken_t[idx1]
-        
-        shaken_t, shaken_d = numba_repair(shaken_t, shaken_d, d_matrix, max_fly)
-    return shaken_t, shaken_d
-
-@njit
-def create_1_array(val):
-    arr = np.zeros(1, dtype=np.int32)
-    arr[0] = val
-    return arr
-
-@njit
-def numba_rvnd(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly, novisit_mask):
-    best_cost = numba_evaluate_hgvns_cost(best_t, best_d, t_matrix, d_matrix, num_nodes, max_fly)
-    neighborhoods = np.array([1, 2, 3, 4, 5, 6, 7], dtype=np.int32)
-    np.random.shuffle(neighborhoods)
-    
-    k = 0
-    while k < 7:
-        n_idx = neighborhoods[k]
-        improved = False
-        
-        if n_idx == 1: 
-            for i in range(1, len(best_t)-1):
-                for j in range(1, len(best_t)):
-                    if i == j or i == j-1: continue
-                    mid = create_1_array(best_t[i])
-                    if i < j: new_t = np.concatenate((best_t[:i], best_t[i+1:j], mid, best_t[j:]))
-                    else: new_t = np.concatenate((best_t[:j], mid, best_t[j:i], best_t[i+1:]))
-                    
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-                        
-        elif n_idx == 2: 
-            for i in range(1, len(best_t)-2):
-                for j in range(1, len(best_t)):
-                    if j == i or j == i+1 or j == i+2: continue
-                    if i < j: new_t = np.concatenate((best_t[:i], best_t[i+2:j], best_t[i:i+2], best_t[j:]))
-                    else: new_t = np.concatenate((best_t[:j], best_t[i:i+2], best_t[j:i], best_t[i+2:]))
-                        
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-
-        elif n_idx == 3: 
-            for i in range(1, len(best_t)-1):
-                for j in range(i+1, len(best_t)-1):
-                    new_t = best_t.copy()
-                    new_t[i], new_t[j] = new_t[j], new_t[i]
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-
-        elif n_idx == 4: 
-            for i in range(1, len(best_t)-2):
-                for j in range(1, len(best_t)-1):
-                    if j == i or j == i+1: continue
-                    mid = create_1_array(best_t[j])
-                    if i < j: new_t = np.concatenate((best_t[:i], mid, best_t[i+2:j], best_t[i:i+2], best_t[j+1:]))
-                    else: new_t = np.concatenate((best_t[:j], best_t[i:i+2], best_t[j+1:i], mid, best_t[i+2:]))
-                        
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-
-        elif n_idx == 5: 
-            for i in range(1, len(best_t)-2):
-                for j in range(i+2, len(best_t)-2):
-                    new_t = best_t.copy()
-                    new_t[i:i+2], new_t[j:j+2] = new_t[j:j+2].copy(), new_t[i:i+2].copy()
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-
-        elif n_idx == 6: 
-            for i in range(1, len(best_t)-2):
-                for j in range(i+1, len(best_t)-1):
-                    new_t = best_t.copy()
-                    new_t[i:j+1] = best_t[i:j+1][::-1]
-                    rep_t, rep_d = numba_repair(new_t, best_d, d_matrix, max_fly)
-                    c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                    if c < best_cost:
-                        best_cost, best_t, best_d = c, rep_t, rep_d
-                        improved = True
-                        break
-                if improved: break
-
-        elif n_idx == 7: 
-            # 7.1: Truck -> Drone
-            for i in range(1, len(best_t)-1):
-                node = best_t[i]
-                if novisit_mask[node]: continue
-                temp_t = np.concatenate((best_t[:i], best_t[i+1:]))
-                best_insert_c = np.inf
-                best_insert_d = best_d
-                best_insert_t = best_t
-                
-                for l_idx in range(len(temp_t)-1):
-                    limit = min(l_idx + 15, len(temp_t)) 
-                    for r_idx in range(l_idx+1, limit):
-                        l_cand, r_cand = temp_t[l_idx], temp_t[r_idx]
-                        if d_matrix[l_cand, node] + d_matrix[node, r_cand] > max_fly: continue
-                        
-                        cand_d = np.zeros((len(best_d)+1, 3), dtype=np.int32)
-                        if len(best_d) > 0: cand_d[:len(best_d)] = best_d
-                        cand_d[len(best_d), 0] = l_cand
-                        cand_d[len(best_d), 1] = node
-                        cand_d[len(best_d), 2] = r_cand
-                        
-                        rep_t, rep_d = numba_repair(temp_t, cand_d, d_matrix, max_fly)
-                        c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                        
-                        if c < best_insert_c:
-                            best_insert_c = c
-                            best_insert_d = rep_d
-                            best_insert_t = rep_t
-                            
-                if best_insert_c < best_cost:
-                    best_cost, best_t, best_d = best_insert_c, best_insert_t, best_insert_d
-                    improved = True
-                    break
-            if improved: 
-                k = 0; continue
-
-            # 7.2: Drone -> Truck
-            if len(best_d) > 0:
-                for i in range(len(best_d)):
-                    temp_d = np.zeros((len(best_d)-1, 3), dtype=np.int32)
-                    idx = 0
-                    for x in range(len(best_d)):
-                        if x == i: continue
-                        temp_d[idx] = best_d[x]
-                        idx += 1
-                        
-                    node = best_d[i, 1]
-                    best_insert_c = np.inf
-                    best_insert_t = best_t
-                    best_insert_d = best_d
-                    
-                    mid = create_1_array(node)
-                    for j in range(1, len(best_t)):
-                        new_t = np.concatenate((best_t[:j], mid, best_t[j:]))
-                        rep_t, rep_d = numba_repair(new_t, temp_d, d_matrix, max_fly)
-                        c = numba_evaluate_hgvns_cost(rep_t, rep_d, t_matrix, d_matrix, num_nodes, max_fly)
-                        if c < best_insert_c:
-                            best_insert_c = c
-                            best_insert_t = rep_t
-                            best_insert_d = rep_d
-                            
-                    if best_insert_c < best_cost:
-                        best_cost, best_t, best_d = best_insert_c, best_insert_t, best_insert_d
-                        improved = True
-                        break
-
-        if improved:
-            np.random.shuffle(neighborhoods)
-            k = 0
-        else:
-            k += 1
-            
-    return best_t, best_d, best_cost
-
 class HGVNS_Engine:
     def __init__(self, parsed_data, custom_tsp=None):
         self.t = parsed_data.truck_time_matrix
@@ -648,12 +313,91 @@ class HGVNS_Engine:
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
         self.custom_tsp = custom_tsp
+        self.eval_memo = {}
 
     def evaluate_cost(self, truck_route, drone_trips):
-        t_arr = np.array(truck_route, dtype=np.int32)
-        if not drone_trips: d_arr = np.zeros((0, 3), dtype=np.int32)
-        else: d_arr = np.array(drone_trips, dtype=np.int32)
-        return numba_evaluate_hgvns_cost(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
+        state_key = (tuple(truck_route), frozenset(drone_trips))
+        if state_key in self.eval_memo: 
+            return self.eval_memo[state_key]
+
+        if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
+            return float('inf')
+
+        idx_map = {node: i for i, node in enumerate(truck_route)}
+        if len(idx_map) != len(truck_route): return float('inf') 
+
+        trip_records = []
+        for l, n, r in drone_trips:
+            if l not in idx_map or r not in idx_map: return float('inf')
+            l_idx, r_idx = idx_map[l], idx_map[r]
+            if l_idx >= r_idx: return float('inf')
+            dt = self.d[l][n] + self.d[n][r]
+            if dt > self.max_fly: return float('inf')
+            trip_records.append((l_idx, r_idx, dt))
+
+        trip_records.sort()
+        for i in range(len(trip_records)-1):
+            if trip_records[i+1][0] < trip_records[i][1]: 
+                return float('inf')
+
+        cost = 0.0
+        r_idx = 0
+        t_idx = 0
+        
+        while r_idx < len(truck_route) - 1:
+            if t_idx < len(trip_records) and trip_records[t_idx][0] == r_idx:
+                ret_idx = trip_records[t_idx][1]
+                dt = trip_records[t_idx][2]
+                
+                tt = 0.0
+                for k in range(r_idx, ret_idx):
+                    tt += self.t[truck_route[k]][truck_route[k+1]]
+                    
+                cost += max(tt, dt)
+                r_idx = ret_idx
+                t_idx += 1
+            else:
+                cost += self.t[truck_route[r_idx]][truck_route[r_idx+1]]
+                r_idx += 1
+
+        self.eval_memo[state_key] = cost
+        return cost
+
+    def repair(self, t_route, d_trips):
+        new_t = list(t_route)
+        new_d = []
+        to_insert = []
+        
+        for l, n, r in d_trips:
+            try:
+                l_idx = new_t.index(l)
+                r_idx = new_t.index(r)
+                if l_idx < r_idx and self.d[l][n] + self.d[n][r] <= self.max_fly:
+                    new_d.append((l, n, r))
+                else:
+                    to_insert.append(n)
+            except ValueError:
+                to_insert.append(n)
+                
+        for node in to_insert:
+            insert_idx = random.randint(1, len(new_t) - 1)
+            new_t.insert(insert_idx, node)
+            
+        return new_t, new_d
+
+    def get_valid_shake(self, base_t, base_d, k_shake):
+        shaken_t, shaken_d = list(base_t), list(base_d)
+        for _ in range(k_shake):
+            if shaken_d and random.random() < 0.5:
+                trip = random.choice(shaken_d)
+                shaken_d.remove(trip)
+                shaken_t.insert(random.randint(1, len(shaken_t)-1), trip[1])
+            
+            if len(shaken_t) > 3:
+                i, j = random.sample(range(1, len(shaken_t)-1), 2)
+                shaken_t[i], shaken_t[j] = shaken_t[j], shaken_t[i]
+                
+        return self.repair(shaken_t, shaken_d)
 
     def _solve_tsp(self):
         if self.custom_tsp and len(self.custom_tsp) > 2:
@@ -713,17 +457,152 @@ class HGVNS_Engine:
                 
         return truck_route, drone_trips
 
+    def algorithm4_rvnd(self, truck_route, drone_trips):
+        best_t, best_d = list(truck_route), list(drone_trips)
+        best_cost = self.evaluate_cost(best_t, best_d)
+        neighborhoods = [1, 2, 3, 4, 5, 6, 7]
+        random.shuffle(neighborhoods)
+        
+        k = 0
+        while k < 7:
+            n_idx = neighborhoods[k]
+            improved = False
+            
+            if n_idx == 1: 
+                for i in range(1, len(best_t)-1):
+                    for j in range(1, len(best_t)):
+                        if i == j or i == j-1: continue
+                        new_t = best_t[:]
+                        node = new_t.pop(i)
+                        new_t.insert(j if j < i else j-1, node)
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+                            
+            elif n_idx == 2: 
+                for i in range(1, len(best_t)-2):
+                    for j in range(1, len(best_t)):
+                        if j in [i, i+1, i+2]: continue
+                        new_t = best_t[:]
+                        n1 = new_t.pop(i)
+                        n2 = new_t.pop(i)
+                        ins = j if j < i else j-2
+                        new_t.insert(ins, n2)
+                        new_t.insert(ins, n1)
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+
+            elif n_idx == 3: 
+                for i in range(1, len(best_t)-1):
+                    for j in range(i+1, len(best_t)-1):
+                        new_t = best_t[:]
+                        new_t[i], new_t[j] = new_t[j], new_t[i]
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+
+            elif n_idx == 4: 
+                for i in range(1, len(best_t)-2):
+                    for j in range(1, len(best_t)-1):
+                        if j == i or j == i+1: continue
+                        new_t = best_t[:]
+                        if i < j:
+                            nj = new_t.pop(j)
+                            ni1 = new_t.pop(i)
+                            ni2 = new_t.pop(i)
+                            new_t.insert(i, nj)
+                            new_t.insert(j-1, ni2)
+                            new_t.insert(j-1, ni1)
+                        else:
+                            ni1 = new_t.pop(i)
+                            ni2 = new_t.pop(i)
+                            nj = new_t.pop(j)
+                            new_t.insert(j, ni2)
+                            new_t.insert(j, ni1)
+                            new_t.insert(i+1, nj)
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+
+            elif n_idx == 5: 
+                for i in range(1, len(best_t)-2):
+                    for j in range(i+2, len(best_t)-2):
+                        new_t = best_t[:]
+                        new_t[i:i+2], new_t[j:j+2] = new_t[j:j+2], new_t[i:i+2]
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+
+            elif n_idx == 6: 
+                for i in range(1, len(best_t)-2):
+                    for j in range(i+1, len(best_t)-1):
+                        new_t = best_t[:]
+                        new_t[i:j+1] = best_t[i:j+1][::-1]
+                        rep_t, rep_d = self.repair(new_t, best_d)
+                        c = self.evaluate_cost(rep_t, rep_d)
+                        if c < best_cost: best_cost, best_t, best_d, improved = c, rep_t, rep_d, True; break
+                    if improved: break
+
+            elif n_idx == 7: 
+                for i in range(1, len(best_t)-1):
+                    node = best_t[i]
+                    if node in self.novisit_list: continue
+                    temp_t = best_t[:i] + best_t[i+1:]
+                    best_insert_c = float('inf')
+                    best_insert_d, best_insert_t = best_d, best_t
+                    
+                    for l_idx in range(len(temp_t)-1):
+                        for r_idx in range(l_idx+1, min(l_idx+15, len(temp_t))):
+                            l, r = temp_t[l_idx], temp_t[r_idx]
+                            if self.d[l][node] + self.d[node][r] <= self.max_fly:
+                                cand_d = best_d[:] + [(l, node, r)]
+                                rep_t, rep_d = self.repair(temp_t, cand_d)
+                                c = self.evaluate_cost(rep_t, rep_d)
+                                if c < best_insert_c:
+                                    best_insert_c, best_insert_t, best_insert_d = c, rep_t, rep_d
+                    
+                    if best_insert_c < best_cost:
+                        best_cost, best_t, best_d, improved = best_insert_c, best_insert_t, best_insert_d, True
+                        break
+                if improved: k=0; continue
+
+                if len(best_d) > 0:
+                    for i, trip in enumerate(best_d):
+                        temp_d = best_d[:i] + best_d[i+1:]
+                        node = trip[1]
+                        best_insert_c = float('inf')
+                        best_insert_t, best_insert_d = best_t, best_d
+                        
+                        for j in range(1, len(best_t)):
+                            new_t = best_t[:]
+                            new_t.insert(j, node)
+                            rep_t, rep_d = self.repair(new_t, temp_d)
+                            c = self.evaluate_cost(rep_t, rep_d)
+                            if c < best_insert_c:
+                                best_insert_c, best_insert_t, best_insert_d = c, rep_t, rep_d
+                                
+                        if best_insert_c < best_cost:
+                            best_cost, best_t, best_d, improved = best_insert_c, best_insert_t, best_insert_d, True
+                            break
+
+            if improved:
+                random.shuffle(neighborhoods)
+                k = 0
+            else:
+                k += 1
+                
+        return best_t, best_d, best_cost
+
     def run(self, progress_bar, status_text, stop_type, stop_val):
         if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde Initial & Global Savings)...")
         best_t, best_d = self.algorithm2_initial_solution()
         best_cost = self.evaluate_cost(best_t, best_d)
-        
-        best_t_arr = np.array(best_t, dtype=np.int32)
-        if not best_d: best_d_arr = np.zeros((0, 3), dtype=np.int32)
-        else: best_d_arr = np.array(best_d, dtype=np.int32)
-        
-        novisit_mask = np.zeros(self.num_nodes, dtype=np.bool_)
-        for nv in self.novisit_list: novisit_mask[nv] = True
         
         k_max = 5
         k_shake = 1
@@ -733,11 +612,10 @@ class HGVNS_Engine:
         
         while True:
             elapsed = time.time() - start_time
-            
             if stop_type == "Max Iterations" and iter_count >= stop_val: break
             if stop_type == "Time Budget (sec)" and elapsed >= stop_val: break
             if stop_type == "No Improvement Iters" and no_improve_count >= stop_val: break
-            if iter_count >= 100000: break 
+            if iter_count >= 50000: break
                 
             if progress_bar:
                 if stop_type == "Max Iterations": progress_bar.progress(min(iter_count / stop_val, 1.0))
@@ -745,14 +623,14 @@ class HGVNS_Engine:
                 else: progress_bar.progress(min(no_improve_count / stop_val, 1.0))
             
             if status_text and iter_count % 10 == 0: 
-                status_text.text(f"HGVNS (C++ Core) Running... Iter: {iter_count} | No Improve: {no_improve_count} | Best: {best_cost:.2f}")
+                status_text.text(f"HGVNS Search... Iter: {iter_count} | No Improve: {no_improve_count} | Best: {best_cost:.2f}")
 
-            shaken_t_arr, shaken_d_arr = numba_get_valid_shake(best_t_arr, best_d_arr, k_shake, self.d, self.max_fly)
-            new_t_arr, new_d_arr, new_cost = numba_rvnd(shaken_t_arr, shaken_d_arr, self.t, self.d, self.num_nodes, self.max_fly, novisit_mask)
+            shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
+            new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
             
             if new_cost < best_cost - 1e-4:
                 best_cost = new_cost
-                best_t_arr, best_d_arr = new_t_arr, new_d_arr
+                best_t, best_d = new_t, new_d
                 k_shake = 1
                 no_improve_count = 0
             else:
@@ -765,9 +643,7 @@ class HGVNS_Engine:
         if progress_bar: progress_bar.progress(1.0)
         if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
         
-        final_t = best_t_arr.tolist()
-        final_d = [tuple(row) for row in best_d_arr]
-        return {'fitness': best_cost, 'truck_route': final_t, 'drone_trips': final_d}
+        return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
 
 # ==========================================
 # 4. INTERACTIVE MAP (PLOTLY)
