@@ -82,7 +82,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODULE: BRKGA & PMA ENGINE (BLUE CORNER)
+# 2. MODULE: BRKGA, PMA & HGVNS FAST EVAL (NUMBA)
 # ==========================================
 @njit
 def fast_2opt(route, t_matrix):
@@ -187,6 +187,90 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
                         path_drone[j] = drone_cust
 
     return cost[N-1], path_prev, path_drone, seq
+
+# HGVNS İçin Strateji C: Numba ile ışık hızında C++ Maliyet Değerlendirmesi
+@njit
+def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max_fly):
+    M = len(drone_trips)
+    if (len(truck_route) - 2 + M) != (num_nodes - 1):
+        return np.inf
+
+    idx_map = np.full(num_nodes, -1, dtype=np.int32)
+    idx_map[0] = 0 
+    
+    for i in range(1, len(truck_route)):
+        node = truck_route[i]
+        if node != 0:
+            idx_map[node] = i
+            
+    valid_map_count = 0
+    for i in range(num_nodes):
+        if idx_map[i] != -1:
+            valid_map_count += 1
+            
+    if valid_map_count != len(truck_route) - 1:
+        return np.inf
+
+    trip_l_idx = np.zeros(M, dtype=np.int32)
+    trip_r_idx = np.zeros(M, dtype=np.int32)
+    trip_dt = np.zeros(M, dtype=np.float64)
+
+    for i in range(M):
+        l = drone_trips[i, 0]
+        n = drone_trips[i, 1]
+        r = drone_trips[i, 2]
+
+        l_idx = 0 if l == 0 else idx_map[l]
+        r_idx = len(truck_route) - 1 if r == 0 else idx_map[r]
+
+        if l_idx == -1 or r_idx == -1 or l_idx >= r_idx:
+            return np.inf
+            
+        dt = d_matrix[l, n] + d_matrix[n, r]
+        if dt > max_fly:
+            return np.inf
+            
+        trip_l_idx[i] = l_idx
+        trip_r_idx[i] = r_idx
+        trip_dt[i] = dt
+
+    # Kronolojik sıralama
+    for i in range(M - 1):
+        for j in range(i + 1, M):
+            if trip_l_idx[i] > trip_l_idx[j]:
+                trip_l_idx[i], trip_l_idx[j] = trip_l_idx[j], trip_l_idx[i]
+                trip_r_idx[i], trip_r_idx[j] = trip_r_idx[j], trip_r_idx[i]
+                trip_dt[i], trip_dt[j] = trip_dt[j], trip_dt[i]
+
+    # Nested/Overlapping engelleme
+    for i in range(M - 1):
+        if trip_l_idx[i + 1] < trip_r_idx[i]:
+            return np.inf
+
+    cost = 0.0
+    r_idx = 0
+    t_idx = 0
+    
+    while r_idx < len(truck_route) - 1:
+        if t_idx < M and trip_l_idx[t_idx] == r_idx:
+            ret_idx = trip_r_idx[t_idx]
+            dt = trip_dt[t_idx]
+            
+            tt = 0.0
+            for k in range(r_idx, ret_idx):
+                tt += t_matrix[truck_route[k], truck_route[k+1]]
+                
+            cost += tt if tt > dt else dt
+            r_idx = ret_idx
+            t_idx += 1
+        else:
+            cost += t_matrix[truck_route[r_idx], truck_route[r_idx+1]]
+            r_idx += 1
+
+    if t_idx != M:
+        return np.inf
+
+    return cost
 
 class DPSplitDecoder:
     def __init__(self, parsed_data):
@@ -310,7 +394,7 @@ class BRKGA_Engine:
 
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (PAPER-PERFECT ARCHITECTURE & PRUNING)
+# 3. MODULE: HGVNS ENGINE (NUMBA ACCELERATED & DEEP INTERRUPT)
 # ==========================================
 class HGVNS_Engine:
     def __init__(self, parsed_data, custom_tsp=None):
@@ -327,57 +411,15 @@ class HGVNS_Engine:
         if state_key in self.eval_memo: 
             return self.eval_memo[state_key]
 
-        if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
-            return float('inf')
-
-        idx_map = {node: i for i, node in enumerate(truck_route) if node != 0}
-        idx_map[0] = 0 
+        # Numba'ya geçiş için Numpy hazırlığı
+        t_arr = np.array(truck_route, dtype=np.int32)
+        if len(drone_trips) > 0:
+            d_arr = np.array(drone_trips, dtype=np.int32)
+        else:
+            d_arr = np.zeros((0, 3), dtype=np.int32)
             
-        if len(idx_map) != len(truck_route) - 1:
-            return float('inf')
-
-        trip_records = []
-        for l, n, r in drone_trips:
-            l_idx = 0 if l == 0 else idx_map.get(l, -1)
-            r_idx = len(truck_route) - 1 if r == 0 else idx_map.get(r, -1)
-            
-            if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: 
-                return float('inf')
-                
-            dt = self.d[l][n] + self.d[n][r]
-            if dt > self.max_fly: 
-                return float('inf')
-                
-            trip_records.append((l_idx, r_idx, dt))
-
-        trip_records.sort()
-        for i in range(len(trip_records)-1):
-            if trip_records[i+1][0] < trip_records[i][1]: 
-                return float('inf')
-
-        cost = 0.0
-        r_idx = 0
-        t_idx = 0
+        cost = fast_eval_hgvns(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
         
-        while r_idx < len(truck_route) - 1:
-            if t_idx < len(trip_records) and trip_records[t_idx][0] == r_idx:
-                ret_idx = trip_records[t_idx][1]
-                dt = trip_records[t_idx][2]
-                
-                tt = 0.0
-                for k in range(r_idx, ret_idx):
-                    tt += self.t[truck_route[k]][truck_route[k+1]]
-                    
-                cost += tt if tt > dt else dt
-                r_idx = ret_idx
-                t_idx += 1
-            else:
-                cost += self.t[truck_route[r_idx]][truck_route[r_idx+1]]
-                r_idx += 1
-
-        if t_idx != len(trip_records):
-            return float('inf')
-
         self.eval_memo[state_key] = cost
         return cost
 
@@ -458,7 +500,7 @@ class HGVNS_Engine:
                 
         return truck_route, drone_trips
 
-    def algorithm4_rvnd(self, truck_route, drone_trips):
+    def algorithm4_rvnd(self, truck_route, drone_trips, start_time, stop_type, stop_val):
         best_t, best_d = list(truck_route), list(drone_trips)
         best_cost = self.evaluate_cost(best_t, best_d)
         neighborhoods = [1, 2, 3, 4, 5, 6, 7]
@@ -466,9 +508,12 @@ class HGVNS_Engine:
         
         k = 0
         while k < 7:
+            # STRATEJİ A: Derin Acil Durum Freni (Zaman kontrolü)
+            if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
+                return best_t, best_d, best_cost
+                
             n_idx = neighborhoods[k]
             improved = False
-            
             mixed_nodes = {l for l,v,r in best_d} | {r for l,v,r in best_d}
             
             if n_idx == 1: 
@@ -497,7 +542,6 @@ class HGVNS_Engine:
                     if improved: break
 
             elif n_idx == 3: 
-                # 3.1 Truck-Truck
                 for i in range(1, len(best_t)-1):
                     for j in range(i+1, len(best_t)-1):
                         new_t = best_t[:]
@@ -507,7 +551,6 @@ class HGVNS_Engine:
                     if improved: break
                 if improved: k=0; continue
 
-                # 3.2 Truck-Drone
                 if len(best_d) > 0:
                     for i in range(1, len(best_t)-1):
                         if best_t[i] in mixed_nodes: continue 
@@ -524,7 +567,6 @@ class HGVNS_Engine:
                         if improved: break
                 if improved: k=0; continue
 
-                # 3.3 Drone-Drone
                 if len(best_d) > 1:
                     for i in range(len(best_d)-1):
                         for j in range(i+1, len(best_d)):
@@ -542,6 +584,9 @@ class HGVNS_Engine:
 
             elif n_idx == 4: 
                 for i in range(1, len(best_t)-2):
+                    # Strateji A: Ağır tünelde saat kontrolü
+                    if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
+                        return best_t, best_d, best_cost
                     for j in range(1, len(best_t)-1):
                         if j == i or j == i+1: continue
                         new_t = best_t[:]
@@ -565,6 +610,8 @@ class HGVNS_Engine:
 
             elif n_idx == 5: 
                 for i in range(1, len(best_t)-2):
+                    if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
+                        return best_t, best_d, best_cost
                     for j in range(i+2, len(best_t)-2):
                         new_t = best_t[:]
                         new_t[i:i+2], new_t[j:j+2] = new_t[j:j+2], new_t[i:i+2]
@@ -588,6 +635,10 @@ class HGVNS_Engine:
 
             elif n_idx == 7: 
                 for i in range(1, len(best_t)-1):
+                    # Strateji A: En ağır döngüde fren kontrolü
+                    if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
+                        return best_t, best_d, best_cost
+                        
                     node = best_t[i]
                     if node in self.novisit_list or node in mixed_nodes: continue 
                     
@@ -614,6 +665,9 @@ class HGVNS_Engine:
 
                 if len(best_d) > 0:
                     for i, trip in enumerate(best_d):
+                        if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
+                            return best_t, best_d, best_cost
+                            
                         temp_d = best_d[:i] + best_d[i+1:]
                         node = trip[1]
                         best_insert_c = float('inf')
@@ -688,7 +742,9 @@ class HGVNS_Engine:
                 status_text.text(f"HGVNS Search... Iter: {iter_count} | No Improve: {no_improve_count} | Best: {best_cost:.2f}")
 
             shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
-            new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d)
+            
+            # Acil Durum Freni için start_time ve kısıtları fonksiyona gönderiyoruz
+            new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d, start_time, stop_type, stop_val)
             
             if new_cost < best_cost - 1e-4:
                 best_cost = new_cost
