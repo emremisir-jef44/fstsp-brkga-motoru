@@ -323,16 +323,25 @@ class HGVNS_Engine:
         if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
             return float('inf')
 
-        idx_map = {node: i for i, node in enumerate(truck_route)}
-        if len(idx_map) != len(truck_route): return float('inf') 
+        # DİKKAT: 0'ın sondaki 0'ı ezmemesi için güvenli sözlük!
+        idx_map = {}
+        for i, node in enumerate(truck_route):
+            if node == 0 and 0 in idx_map:
+                continue
+            idx_map[node] = i
 
         trip_records = []
         for l, n, r in drone_trips:
-            if l not in idx_map or r not in idx_map: return float('inf')
-            l_idx, r_idx = idx_map[l], idx_map[r]
-            if l_idx >= r_idx: return float('inf')
+            l_idx = 0 if l == 0 else idx_map.get(l, -1)
+            r_idx = len(truck_route) - 1 if r == 0 else idx_map.get(r, -1)
+            
+            if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: 
+                return float('inf')
+                
             dt = self.d[l][n] + self.d[n][r]
-            if dt > self.max_fly: return float('inf')
+            if dt > self.max_fly: 
+                return float('inf')
+                
             trip_records.append((l_idx, r_idx, dt))
 
         trip_records.sort()
@@ -370,8 +379,8 @@ class HGVNS_Engine:
         
         for l, n, r in d_trips:
             try:
-                l_idx = new_t.index(l)
-                r_idx = new_t.index(r)
+                l_idx = 0 if l == 0 else new_t.index(l)
+                r_idx = len(new_t) - 1 if r == 0 else new_t.index(r)
                 if l_idx < r_idx and self.d[l][n] + self.d[n][r] <= self.max_fly:
                     new_d.append((l, n, r))
                 else:
