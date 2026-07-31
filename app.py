@@ -404,24 +404,18 @@ class HGVNS_Engine:
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
         self.custom_tsp = custom_tsp
-        self.eval_memo = {}
+        # Hafıza sözlüğünü (eval_memo) RAM patlamasını engellemek için tamamen sildik!
 
     def evaluate_cost(self, truck_route, drone_trips):
-        state_key = (tuple(truck_route), frozenset(drone_trips))
-        if state_key in self.eval_memo: 
-            return self.eval_memo[state_key]
-
-        # Numba'ya geçiş için Numpy hazırlığı
+        # Listeleri saf C++ işleme gücü (Numba) için Numpy Array'e çeviriyoruz
         t_arr = np.array(truck_route, dtype=np.int32)
         if len(drone_trips) > 0:
             d_arr = np.array(drone_trips, dtype=np.int32)
         else:
             d_arr = np.zeros((0, 3), dtype=np.int32)
             
-        cost = fast_eval_hgvns(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
-        
-        self.eval_memo[state_key] = cost
-        return cost
+        # Hafızaya sormadan direkt vahşi CPU gücüyle anında hesapla!
+        return fast_eval_hgvns(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
 
     def get_valid_shake(self, base_t, base_d, k_shake):
         shaken_t, shaken_d = list(base_t), list(base_d)
