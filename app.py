@@ -310,7 +310,7 @@ class BRKGA_Engine:
 
 
 # ==========================================
-# 3. MODULE: HGVNS ENGINE (PAPER-PERFECT ARCHITECTURE)
+# 3. MODULE: HGVNS ENGINE (PAPER-PERFECT ARCHITECTURE & PRUNING)
 # ==========================================
 class HGVNS_Engine:
     def __init__(self, parsed_data, custom_tsp=None):
@@ -330,11 +330,8 @@ class HGVNS_Engine:
         if (len(truck_route) - 2 + len(drone_trips)) != (self.num_nodes - 1):
             return float('inf')
 
-        idx_map = {}
-        for i, node in enumerate(truck_route):
-            if node == 0 and 0 in idx_map:
-                continue
-            idx_map[node] = i
+        idx_map = {node: i for i, node in enumerate(truck_route) if node != 0}
+        idx_map[0] = 0 # İlk Depot'u güvene al
             
         if len(idx_map) != len(truck_route) - 1:
             return float('inf')
@@ -344,6 +341,7 @@ class HGVNS_Engine:
             l_idx = 0 if l == 0 else idx_map.get(l, -1)
             r_idx = len(truck_route) - 1 if r == 0 else idx_map.get(r, -1)
             
+            # Anında Reddetme (Immediate Discard) - Kurallara Aykırı Uçuşlar
             if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: 
                 return float('inf')
                 
@@ -354,6 +352,7 @@ class HGVNS_Engine:
             trip_records.append((l_idx, r_idx, dt))
 
         trip_records.sort()
+        # İç içe geçen veya kesişen uçuşları engelleme
         for i in range(len(trip_records)-1):
             if trip_records[i+1][0] < trip_records[i][1]: 
                 return float('inf')
@@ -371,7 +370,7 @@ class HGVNS_Engine:
                 for k in range(r_idx, ret_idx):
                     tt += self.t[truck_route[k]][truck_route[k+1]]
                     
-                cost += max(tt, dt)
+                cost += tt if tt > dt else dt
                 r_idx = ret_idx
                 t_idx += 1
             else:
@@ -442,11 +441,13 @@ class HGVNS_Engine:
                 temp_t = truck_route[:j] + truck_route[j+1:]
                 
                 for l_idx in range(len(temp_t)-1):
-                    for r_idx in range(l_idx+1, len(temp_t)):
-                        prev_n, next_n = temp_t[l_idx], temp_t[r_idx]
-                        if self.d[prev_n][node] + self.d[node][next_n] > self.max_fly: continue
+                    l = temp_t[l_idx]
+                    if self.d[l][node] > self.max_fly: continue # Mesafe Kalkanı
+                    for r_idx in range(l_idx+1, min(l_idx+15, len(temp_t))):
+                        r = temp_t[r_idx]
+                        if self.d[l][node] + self.d[node][r] > self.max_fly: continue 
                         
-                        cand_d = drone_trips[:] + [(prev_n, node, next_n)]
+                        cand_d = drone_trips[:] + [(l, node, r)]
                         c = self.evaluate_cost(temp_t, cand_d)
                         
                         if c < best_c:
@@ -469,6 +470,9 @@ class HGVNS_Engine:
         while k < 7:
             n_idx = neighborhoods[k]
             improved = False
+            
+            # Tüm dron kalkış/iniş noktalarını "Karmaşık Düğüm (Mixed Node)" filtresi için topla
+            mixed_nodes = {l for l,v,r in best_d} | {r for l,v,r in best_d}
             
             if n_idx == 1: 
                 for i in range(1, len(best_t)-1):
@@ -506,13 +510,16 @@ class HGVNS_Engine:
                     if improved: break
                 if improved: k=0; continue
 
-                # 3.2 Truck-Drone
+                # 3.2 Truck-Drone (Saf kamyon durağı ile saf dron durağı yer değiştirir)
                 if len(best_d) > 0:
                     for i in range(1, len(best_t)-1):
+                        if best_t[i] in mixed_nodes: continue # Karışık düğüm kalkanı
                         for j in range(len(best_d)):
                             new_t, new_d = best_t[:], best_d[:]
                             t_node = new_t[i]
                             l, d_node, r = new_d[j]
+                            if self.d[l][t_node] + self.d[t_node][r] > self.max_fly: continue # Menzil Kalkanı
+                            
                             new_t[i] = d_node
                             new_d[j] = (l, t_node, r)
                             c = self.evaluate_cost(new_t, new_d)
@@ -527,6 +534,9 @@ class HGVNS_Engine:
                             new_d = best_d[:]
                             l1, n1, r1 = new_d[i]
                             l2, n2, r2 = new_d[j]
+                            if self.d[l1][n2] + self.d[n2][r1] > self.max_fly: continue
+                            if self.d[l2][n1] + self.d[n1][r2] > self.max_fly: continue
+                            
                             new_d[i] = (l1, n2, r1)
                             new_d[j] = (l2, n1, r2)
                             c = self.evaluate_cost(best_t, new_d)
@@ -565,19 +575,25 @@ class HGVNS_Engine:
                         if c < best_cost: best_cost, best_t, improved = c, new_t, True; break
                     if improved: break
 
-            elif n_idx == 6: 
+            elif n_idx == 6: # 2-OPT ile O(1) Pruning Kalkanı
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
-                        new_t = best_t[:]
-                        new_t[i:j+1] = best_t[i:j+1][::-1]
+                        n1, n2 = best_t[i-1], best_t[i]
+                        n3, n4 = best_t[j], best_t[j+1]
+                        # Sadece yeni bağlanacak yollar, silinen yollardan kısaysa tam hesaplama yap (O(1) Delta Check)
+                        if self.t[n1][n3] + self.t[n2][n4] >= self.t[n1][n2] + self.t[n3][n4]:
+                            continue
+                            
+                        new_t = best_t[:i] + best_t[i:j+1][::-1] + best_t[j+1:]
                         c = self.evaluate_cost(new_t, best_d)
                         if c < best_cost: best_cost, best_t, improved = c, new_t, True; break
                     if improved: break
 
-            elif n_idx == 7: 
+            elif n_idx == 7: # Relocate Customer (Saf theta(ct^2 cd) mimarisi)
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
-                    if node in self.novisit_list: continue
+                    if node in self.novisit_list or node in mixed_nodes: continue # Dron Atama Kalkanı: Sadece saf kamyon durakları!
+                    
                     temp_t = best_t[:i] + best_t[i+1:]
                     best_insert_c = float('inf')
                     best_insert_d, best_insert_t = best_d, best_t
