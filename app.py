@@ -331,7 +331,7 @@ class HGVNS_Engine:
             return float('inf')
 
         idx_map = {node: i for i, node in enumerate(truck_route) if node != 0}
-        idx_map[0] = 0 # İlk Depot'u güvene al
+        idx_map[0] = 0 
             
         if len(idx_map) != len(truck_route) - 1:
             return float('inf')
@@ -341,7 +341,6 @@ class HGVNS_Engine:
             l_idx = 0 if l == 0 else idx_map.get(l, -1)
             r_idx = len(truck_route) - 1 if r == 0 else idx_map.get(r, -1)
             
-            # Anında Reddetme (Immediate Discard) - Kurallara Aykırı Uçuşlar
             if l_idx == -1 or r_idx == -1 or l_idx >= r_idx: 
                 return float('inf')
                 
@@ -352,7 +351,6 @@ class HGVNS_Engine:
             trip_records.append((l_idx, r_idx, dt))
 
         trip_records.sort()
-        # İç içe geçen veya kesişen uçuşları engelleme
         for i in range(len(trip_records)-1):
             if trip_records[i+1][0] < trip_records[i][1]: 
                 return float('inf')
@@ -442,7 +440,7 @@ class HGVNS_Engine:
                 
                 for l_idx in range(len(temp_t)-1):
                     l = temp_t[l_idx]
-                    if self.d[l][node] > self.max_fly: continue # Mesafe Kalkanı
+                    if self.d[l][node] > self.max_fly: continue 
                     for r_idx in range(l_idx+1, min(l_idx+15, len(temp_t))):
                         r = temp_t[r_idx]
                         if self.d[l][node] + self.d[node][r] > self.max_fly: continue 
@@ -471,7 +469,6 @@ class HGVNS_Engine:
             n_idx = neighborhoods[k]
             improved = False
             
-            # Tüm dron kalkış/iniş noktalarını "Karmaşık Düğüm (Mixed Node)" filtresi için topla
             mixed_nodes = {l for l,v,r in best_d} | {r for l,v,r in best_d}
             
             if n_idx == 1: 
@@ -510,15 +507,15 @@ class HGVNS_Engine:
                     if improved: break
                 if improved: k=0; continue
 
-                # 3.2 Truck-Drone (Saf kamyon durağı ile saf dron durağı yer değiştirir)
+                # 3.2 Truck-Drone
                 if len(best_d) > 0:
                     for i in range(1, len(best_t)-1):
-                        if best_t[i] in mixed_nodes: continue # Karışık düğüm kalkanı
+                        if best_t[i] in mixed_nodes: continue 
                         for j in range(len(best_d)):
                             new_t, new_d = best_t[:], best_d[:]
                             t_node = new_t[i]
                             l, d_node, r = new_d[j]
-                            if self.d[l][t_node] + self.d[t_node][r] > self.max_fly: continue # Menzil Kalkanı
+                            if self.d[l][t_node] + self.d[t_node][r] > self.max_fly: continue
                             
                             new_t[i] = d_node
                             new_d[j] = (l, t_node, r)
@@ -575,12 +572,12 @@ class HGVNS_Engine:
                         if c < best_cost: best_cost, best_t, improved = c, new_t, True; break
                     if improved: break
 
-            elif n_idx == 6: # 2-OPT ile O(1) Pruning Kalkanı
+            elif n_idx == 6: 
                 for i in range(1, len(best_t)-2):
                     for j in range(i+1, len(best_t)-1):
                         n1, n2 = best_t[i-1], best_t[i]
                         n3, n4 = best_t[j], best_t[j+1]
-                        # Sadece yeni bağlanacak yollar, silinen yollardan kısaysa tam hesaplama yap (O(1) Delta Check)
+                        
                         if self.t[n1][n3] + self.t[n2][n4] >= self.t[n1][n2] + self.t[n3][n4]:
                             continue
                             
@@ -589,10 +586,10 @@ class HGVNS_Engine:
                         if c < best_cost: best_cost, best_t, improved = c, new_t, True; break
                     if improved: break
 
-            elif n_idx == 7: # Relocate Customer (Saf theta(ct^2 cd) mimarisi)
+            elif n_idx == 7: 
                 for i in range(1, len(best_t)-1):
                     node = best_t[i]
-                    if node in self.novisit_list or node in mixed_nodes: continue # Dron Atama Kalkanı: Sadece saf kamyon durakları!
+                    if node in self.novisit_list or node in mixed_nodes: continue 
                     
                     temp_t = best_t[:i] + best_t[i+1:]
                     best_insert_c = float('inf')
@@ -762,6 +759,11 @@ mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
 rho_e = st.sidebar.slider("Biased Crossover (ρ_e)", 0.50, 0.95, 0.70, 0.05)
 max_gen = st.sidebar.number_input("Maximum Generation", value=150, min_value=10, max_value=2000)
 
+st.sidebar.subheader("Local Search Heuristics (BRKGA)")
+use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
+use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
+st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
+
 st.sidebar.divider()
 st.sidebar.header("HGVNS Parameters")
 hgvns_stop_type = st.sidebar.radio("Stopping Condition", ["Max Iterations", "Time Budget (sec)", "No Improvement Iters"])
@@ -776,12 +778,6 @@ st.sidebar.divider()
 st.sidebar.header("Advanced / Paper Tricks")
 use_custom_tsp = st.sidebar.checkbox("Auto-Load Optimal TSP Route (Concorde)", value=True)
 parsed_tsp = None
-
-st.sidebar.divider()
-st.sidebar.header("Local Search Heuristics")
-use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
-use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
-st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
 
 st.subheader("1. Dataset Selection")
 dataset_folder = "datasets"
