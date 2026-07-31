@@ -266,6 +266,7 @@ class BRKGA_Engine:
         ind['drone_trips'] = d_trips
 
     def run(self, progress_bar, status_text, use_2opt, use_3opt, log_console=None):
+        if log_console: log_console.write("🧬 **BRKGA Engine Initialized:** Creating initial population...")
         population = [self.create_individual() for _ in range(self.p)]
         
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
@@ -275,6 +276,8 @@ class BRKGA_Engine:
             population.sort(key=lambda x: x['fitness'])
             
             if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
+                if best_solution is not None and log_console:
+                    log_console.write(f"🎉 **Gen {gen+1}:** New Best Makespan Found! `{best_solution['fitness']:.2f}` ➔ `{population[0]['fitness']:.2f}`")
                 best_solution = population[0].copy()
                 
             next_gen = population[:self.p_e]
@@ -299,6 +302,10 @@ class BRKGA_Engine:
             if progress_bar: progress_bar.progress((gen + 1) / self.max_gen)
             if status_text: status_text.text(f"BRKGA Running... Gen {gen+1}/{self.max_gen} | Score: {best_solution['fitness']:.2f}")
             
+            if log_console and (gen + 1) % 50 == 0:
+                log_console.write(f"⏳ **Gen {gen+1} Status Update:** Current Best Makespan = `{best_solution['fitness']:.2f}`")
+                
+        if log_console: log_console.write("✅ **Optimization Complete!** Final best solution preserved.")
         return best_solution
 
 
