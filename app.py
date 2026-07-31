@@ -908,13 +908,27 @@ else:
                 with col_r1:
                     st.markdown("#### 🟦 BRKGA Routes")
                     st.caption("**Truck Route:** " + " ➔ ".join(map(str, sol_b['truck_route'])))
-                    for i, t_trip in enumerate(sol_b['drone_trips']):
+                    
+                    truck_idx_b = {}
+                    for idx, node in enumerate(sol_b['truck_route']):
+                        if node not in truck_idx_b:
+                            truck_idx_b[node] = idx
+                    sorted_d_trips_b = sorted(sol_b['drone_trips'], key=lambda x: truck_idx_b.get(x[0], 999))
+                    
+                    for i, t_trip in enumerate(sorted_d_trips_b):
                         st.caption(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
                         
                 with col_r2:
                     st.markdown("#### 🟥 HGVNS Routes")
                     st.caption("**Truck Route:** " + " ➔ ".join(map(str, sol_h['truck_route'])))
-                    for i, t_trip in enumerate(sol_h['drone_trips']):
+                    
+                    truck_idx_h = {}
+                    for idx, node in enumerate(sol_h['truck_route']):
+                        if node not in truck_idx_h:
+                            truck_idx_h[node] = idx
+                    sorted_d_trips_h = sorted(sol_h['drone_trips'], key=lambda x: truck_idx_h.get(x[0], 999))
+                    
+                    for i, t_trip in enumerate(sorted_d_trips_h):
                         st.caption(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
 
             elif solver_type == "BRKGA (Memetic)":
@@ -937,7 +951,14 @@ else:
                 
                 st.markdown("#### 📝 Route Details")
                 st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
-                for i, t_trip in enumerate(sol['drone_trips']):
+                
+                truck_idx = {}
+                for idx, node in enumerate(sol['truck_route']):
+                    if node not in truck_idx:
+                        truck_idx[node] = idx
+                sorted_d_trips = sorted(sol['drone_trips'], key=lambda x: truck_idx.get(x[0], 999))
+                
+                for i, t_trip in enumerate(sorted_d_trips):
                     st.write(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
 
             elif solver_type == "HGVNS (Paper Replica)":
@@ -956,5 +977,12 @@ else:
                 
                 st.markdown("#### 📝 Route Details")
                 st.write("**Truck Route:** " + " ➔ ".join(map(str, sol['truck_route'])))
-                for i, t_trip in enumerate(sol['drone_trips']):
+                
+                truck_idx = {}
+                for idx, node in enumerate(sol['truck_route']):
+                    if node not in truck_idx:
+                        truck_idx[node] = idx
+                sorted_d_trips = sorted(sol['drone_trips'], key=lambda x: truck_idx.get(x[0], 999))
+                
+                for i, t_trip in enumerate(sorted_d_trips):
                     st.write(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
