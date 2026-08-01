@@ -190,7 +190,7 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
 
 
 @njit
-def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly, drone_prob, look_ahead):
+def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly, drone_prob, look_ahead, unlimited_look_ahead):
     customers = np.arange(1, num_nodes)
     sorted_indices = np.argsort(route_rk)
     seq = customers[sorted_indices]
@@ -198,7 +198,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
     labels = np.zeros(len(seq), dtype=np.int32) # 0 = T, 1 = D
     for i in range(len(seq)):
         cust = seq[i]
-        # Statik Tamir: NOVISIT ise D atama
         if td_rk[i] < drone_prob and not novisit_mask[cust]:
             labels[i] = 1 
 
@@ -227,7 +226,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
     curr_T_idx = 0
 
     while curr_T_idx < N - 1:
-        # Sonraki D noktasını bul
         d_idx = -1
         for i in range(curr_T_idx + 1, N - 1):
             if full_labels[i] == 1:
@@ -235,7 +233,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                 break
                 
         if d_idx == -1:
-            # Başka D yoksa kalanları kamyonla gez
             for i in range(curr_T_idx + 1, N):
                 cost += t_matrix[full_seq[curr_T_idx], full_seq[i]]
                 truck_route_arr[truck_count] = full_seq[i]
@@ -243,7 +240,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                 curr_T_idx = i
             break
             
-        # Olası en uzak iniş noktasını bul (diğer D'nin üstüne atlamamak için)
         next_d_idx = N - 1
         for i in range(d_idx + 1, N - 1):
             if full_labels[i] == 1:
@@ -255,16 +251,19 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
         best_proj_cost = np.inf
         best_block_cost = np.inf
         
-        # Look-ahead limiti
-        max_rend = min(N - 1, d_idx + look_ahead)
-        if max_rend >= next_d_idx:
+        # Look-ahead veya sınırsız (bir sonraki D'ye kadar) tarama mantığı
+        if unlimited_look_ahead:
             max_rend = next_d_idx - 1
+        else:
+            max_rend = min(N - 1, d_idx + look_ahead)
+            if max_rend >= next_d_idx:
+                max_rend = next_d_idx - 1
+                
         if max_rend < d_idx + 1:
             max_rend = d_idx + 1 
             
         ref_node = max_rend
             
-        # Tüm olası (Kalkış, İniş) kombinasyonlarını tara (Interval Scanning)
         for l in range(curr_T_idx, d_idx):
             for r in range(d_idx + 1, max_rend + 1):
                 n_L = full_seq[l]
@@ -275,14 +274,12 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                 if d_time > max_fly:
                     continue
                     
-                # Kamyonun curr_T_idx'den Kalkış'a gitme süresi
                 t_pre = 0.0
                 prev = full_seq[curr_T_idx]
                 for k in range(curr_T_idx + 1, l + 1):
                     t_pre += t_matrix[prev, full_seq[k]]
                     prev = full_seq[k]
                     
-                # Kamyonun Kalkış'tan İniş'e gitme süresi (D'yi atlayarak)
                 t_mid = 0.0
                 prev = full_seq[l]
                 for k in range(l + 1, r + 1):
@@ -292,7 +289,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                     
                 block_cost = t_pre + max(d_time, t_mid)
                 
-                # Adil kıyaslama için ref_node'a kadar olan maliyeti yansıt
                 t_post = 0.0
                 prev = full_seq[r]
                 for k in range(r + 1, ref_node + 1):
@@ -308,7 +304,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                     best_rend = r
                     
         if best_launch != -1:
-            # En kârlı kombinasyonu uygula!
             for k in range(curr_T_idx + 1, best_rend + 1):
                 if k == d_idx: continue
                 truck_route_arr[truck_count] = full_seq[k]
@@ -322,7 +317,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
             cost += best_block_cost
             curr_T_idx = best_rend
         else:
-            # MAXFLY yetmedi! D'yi T'ye çevir ve loop'u baştan sar
             full_labels[d_idx] = 0
 
     return cost, truck_route_arr[:truck_count], drone_trips_l[:drone_count], drone_trips_n[:drone_count], drone_trips_r[:drone_count]
@@ -451,7 +445,7 @@ class DPSplitDecoder:
         return cost, truck_route, drone_trips
 
 class SmartTDDecoder:
-    def __init__(self, parsed_data, drone_prob=30, look_ahead=3):
+    def __init__(self, parsed_data, drone_prob=30, look_ahead=3, unlimited_look_ahead=True):
         self.t = parsed_data.truck_time_matrix
         self.d = parsed_data.drone_time_matrix
         self.num_nodes = parsed_data.num_nodes
@@ -461,16 +455,16 @@ class SmartTDDecoder:
             self.novisit_mask[nv] = True
         self.drone_prob = drone_prob / 100.0
         self.look_ahead = look_ahead
+        self.unlimited_look_ahead = unlimited_look_ahead
 
     def decode(self, rk_route):
         n_cust = self.num_nodes - 1
-        # Kromozom iki parça: İlk yarı Rota, İkinci yarı T/D Modu
         route_rk = np.array(rk_route[:n_cust], dtype=np.float64)
         td_rk = np.array(rk_route[n_cust:], dtype=np.float64)
         
         cost, t_arr, dl, dn, dr = fast_heuristic_decode(
             route_rk, td_rk, self.t, self.d, self.num_nodes, 
-            self.novisit_mask, self.max_fly, self.drone_prob, self.look_ahead
+            self.novisit_mask, self.max_fly, self.drone_prob, self.look_ahead, self.unlimited_look_ahead
         )
         
         truck_route = t_arr.tolist()
@@ -500,7 +494,6 @@ class BRKGA_Engine:
         apply_ls = (use_2opt or use_3opt) and (random.random() < 0.10)
         
         if apply_ls:
-            # LS sadece rotalama genlerine (ilk yarı) uygulanır!
             route_part = rk_route[:self.num_cust]
             customers = np.arange(1, self.num_cust + 1)
             sorted_indices = np.argsort(route_part)
@@ -518,7 +511,6 @@ class BRKGA_Engine:
             for i, cust in enumerate(new_seq):
                 new_rk[cust - 1] = (i + 1) * spacing
                 
-            # Eğitimli (Memetik) rotayı kromozomun ilk yarısına geri yaz
             ind['route'][:self.num_cust] = new_rk.tolist()
 
         cost, t_route, d_trips = self.decoder.decode(ind['route'])
@@ -982,9 +974,11 @@ brkga_decoder_type = st.sidebar.radio("Select Decoder:", ["Smart DP-Split (Optim
 
 drone_prob = 30
 look_ahead = 3
+unlimited_look_ahead = True
 if brkga_decoder_type == "Classic T/D Heuristic (Fast)":
     drone_prob = st.sidebar.slider("Drone Assignment Probability (%)", 0, 100, 30, 5)
-    look_ahead = st.sidebar.slider("Rendezvous Look-Ahead Limit", 1, 5, 3, 1)
+    unlimited_look_ahead = st.sidebar.checkbox("Scan until next drone (Unlimited)", value=True)
+    look_ahead = st.sidebar.slider("Rendezvous Look-Ahead Limit", 1, 10, 3, 1, disabled=unlimited_look_ahead)
 
 st.sidebar.divider()
 pop_size = st.sidebar.slider("Population (p)", 50, 500, 300, 10)
@@ -1116,7 +1110,7 @@ else:
                 active_decoder = DPSplitDecoder(parsed_data)
                 active_chrom_len = parsed_data.num_nodes - 1
             else:
-                active_decoder = SmartTDDecoder(parsed_data, drone_prob, look_ahead)
+                active_decoder = SmartTDDecoder(parsed_data, drone_prob, look_ahead, unlimited_look_ahead)
                 active_chrom_len = (parsed_data.num_nodes - 1) * 2
             
             if solver_type == "Benchmark (Run Both)":
