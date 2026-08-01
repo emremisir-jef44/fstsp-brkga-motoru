@@ -240,7 +240,7 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
             best_j = -1
             best_seg_time = np.inf
 
-            # İleriye Bakış (Look-Ahead) Sınırı
+            # İleriye Bakış (Look-Ahead / Interval Launch) Sınırı
             limit = i + 1 + look_ahead
             if limit > N: limit = N
 
@@ -268,6 +268,7 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
                 drone_trips_r[drone_count] = full_seq[best_j]
                 drone_count += 1
 
+                # Arada kalan tüm duraklar (interval launch) zorunlu olarak Kamyon (T) tarafından gezilir
                 for k in range(i + 1, best_j + 1):
                     truck_route_arr[truck_count] = full_seq[k]
                     truck_count += 1
