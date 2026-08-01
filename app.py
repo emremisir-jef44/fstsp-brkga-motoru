@@ -82,7 +82,7 @@ class FSTSP_Parser:
         return t_matrix, d_matrix
 
 # ==========================================
-# 2. MODULE: BRKGA, PMA & HGVNS FAST EVAL (NUMBA)
+# 2. MODULE: FAST EVALUATORS & DECODERS (NUMBA)
 # ==========================================
 @njit
 def fast_2opt(route, t_matrix):
@@ -189,6 +189,98 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
     return cost[N-1], path_prev, path_drone, seq
 
 @njit
+def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly, drone_prob, look_ahead):
+    customers = np.arange(1, num_nodes)
+    sorted_indices = np.argsort(route_rk)
+    seq = customers[sorted_indices]
+
+    labels = np.zeros(len(seq), dtype=np.int32) # 0 = T, 1 = D
+    for i in range(len(seq)):
+        cust = seq[i]
+        # Statik Tamir: NOVISIT ise uçurma
+        if td_rk[i] < drone_prob and not novisit_mask[cust]:
+            labels[i] = 1 
+
+    # Kılavuz Tamiri: Ardışık 'D' leri engelle
+    for i in range(len(labels) - 1):
+        if labels[i] == 1 and labels[i+1] == 1:
+            labels[i+1] = 0
+
+    N = len(seq) + 2
+    full_seq = np.zeros(N, dtype=np.int32)
+    full_seq[1:-1] = seq
+    full_labels = np.zeros(N, dtype=np.int32)
+    full_labels[1:-1] = labels
+
+    cost = 0.0
+    truck_route_arr = np.zeros(N, dtype=np.int32)
+    truck_count = 0
+    truck_route_arr[truck_count] = 0
+    truck_count += 1
+
+    drone_trips_l = np.zeros(N, dtype=np.int32)
+    drone_trips_n = np.zeros(N, dtype=np.int32)
+    drone_trips_r = np.zeros(N, dtype=np.int32)
+    drone_count = 0
+
+    i = 1
+    last_T_idx = 0
+
+    while i < N:
+        if full_labels[i] == 0: # Truck
+            truck_route_arr[truck_count] = full_seq[i]
+            truck_count += 1
+            cost += t_matrix[full_seq[last_T_idx], full_seq[i]]
+            last_T_idx = i
+            i += 1
+        else: # Drone
+            n_prev = full_seq[last_T_idx]
+            n_D = full_seq[i]
+
+            best_j = -1
+            best_seg_time = np.inf
+
+            # İleriye Bakış (Look-Ahead) Sınırı
+            limit = i + 1 + look_ahead
+            if limit > N: limit = N
+
+            for j in range(i + 1, limit):
+                n_next = full_seq[j]
+                d_time = d_matrix[n_prev, n_D] + d_matrix[n_D, n_next]
+
+                if d_time <= max_fly:
+                    t_time = 0.0
+                    curr_t = n_prev
+                    for k in range(i + 1, j + 1):
+                        t_time += t_matrix[curr_t, full_seq[k]]
+                        curr_t = full_seq[k]
+
+                    seg_time = max(d_time, t_time)
+                    if seg_time < best_seg_time:
+                        best_seg_time = seg_time
+                        best_j = j
+
+            if best_j != -1:
+                # Dinamik Onay: Geçerli İniş Bulundu!
+                cost += best_seg_time
+                drone_trips_l[drone_count] = n_prev
+                drone_trips_n[drone_count] = n_D
+                drone_trips_r[drone_count] = full_seq[best_j]
+                drone_count += 1
+
+                for k in range(i + 1, best_j + 1):
+                    truck_route_arr[truck_count] = full_seq[k]
+                    truck_count += 1
+
+                last_T_idx = best_j
+                i = best_j + 1
+            else:
+                # Dinamik Tamir: MAXFLY yetmedi, D'yi T'ye çevir ve loop'u tekrarlat
+                full_labels[i] = 0
+
+    return cost, truck_route_arr[:truck_count], drone_trips_l[:drone_count], drone_trips_n[:drone_count], drone_trips_r[:drone_count]
+
+@njit
 def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max_fly):
     M = len(drone_trips)
     if (len(truck_route) - 2 + M) != (num_nodes - 1):
@@ -269,6 +361,9 @@ def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max
 
     return cost
 
+# ==========================================
+# 3. MODULE: DECODER CLASSES
+# ==========================================
 class DPSplitDecoder:
     def __init__(self, parsed_data):
         self.t = parsed_data.truck_time_matrix
@@ -307,27 +402,62 @@ class DPSplitDecoder:
                 
         return cost, truck_route, drone_trips
 
+class SmartTDDecoder:
+    def __init__(self, parsed_data, drone_prob=30, look_ahead=3):
+        self.t = parsed_data.truck_time_matrix
+        self.d = parsed_data.drone_time_matrix
+        self.num_nodes = parsed_data.num_nodes
+        self.max_fly = parsed_data.max_fly
+        self.novisit_mask = np.zeros(self.num_nodes, dtype=np.bool_)
+        for nv in parsed_data.novisit_list:
+            self.novisit_mask[nv] = True
+        self.drone_prob = drone_prob / 100.0
+        self.look_ahead = look_ahead
+
+    def decode(self, rk_route):
+        n_cust = self.num_nodes - 1
+        # Kromozom iki parça: İlk yarı Rota, İkinci yarı T/D Modu
+        route_rk = np.array(rk_route[:n_cust], dtype=np.float64)
+        td_rk = np.array(rk_route[n_cust:], dtype=np.float64)
+        
+        cost, t_arr, dl, dn, dr = fast_heuristic_decode(
+            route_rk, td_rk, self.t, self.d, self.num_nodes, 
+            self.novisit_mask, self.max_fly, self.drone_prob, self.look_ahead
+        )
+        
+        truck_route = t_arr.tolist()
+        drone_trips = [(dl[i], dn[i], dr[i]) for i in range(len(dl))]
+        
+        return cost, truck_route, drone_trips
+
+# ==========================================
+# 4. MODULE: BRKGA & HGVNS ENGINES
+# ==========================================
 class BRKGA_Engine:
-    def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder):
+    def __init__(self, p, p_e_ratio, p_m_ratio, rho_e, max_gen, decoder, chrom_len):
         self.p = p
         self.p_e = int(p * (p_e_ratio / 100))
         self.p_m = int(p * (p_m_ratio / 100))
         self.rho_e = rho_e
         self.max_gen = max_gen
         self.decoder = decoder
-        self.num_cust = decoder.num_nodes - 1
+        self.chrom_len = chrom_len
+        self.num_cust = decoder.num_nodes - 1 
 
     def create_individual(self):
-        return {'route': [random.random() for _ in range(self.num_cust)], 'fitness': float('inf'), 'truck_route': [], 'drone_trips': []}
+        return {'route': [random.random() for _ in range(self.chrom_len)], 'fitness': float('inf'), 'truck_route': [], 'drone_trips': []}
 
     def evaluate(self, ind, use_2opt, use_3opt):
         rk_route = np.array(ind['route'])
         apply_ls = (use_2opt or use_3opt) and (random.random() < 0.10)
         
         if apply_ls:
+            # LS sadece rotalama genlerine (ilk yarı) uygulanır!
+            route_part = rk_route[:self.num_cust]
             customers = np.arange(1, self.num_cust + 1)
-            sorted_indices = np.argsort(rk_route)
+            sorted_indices = np.argsort(route_part)
             seq = customers[sorted_indices]
+            
             full_seq = np.zeros(len(seq) + 2, dtype=np.int32)
             full_seq[1:-1] = seq
             
@@ -339,7 +469,9 @@ class BRKGA_Engine:
             spacing = 1.0 / (len(new_seq) + 1)
             for i, cust in enumerate(new_seq):
                 new_rk[cust - 1] = (i + 1) * spacing
-            ind['route'] = new_rk.tolist()
+                
+            # Eğitimli (Memetik) rotayı kromozomun ilk yarısına geri yaz
+            ind['route'][:self.num_cust] = new_rk.tolist()
 
         cost, t_route, d_trips = self.decoder.decode(ind['route'])
         ind['fitness'] = cost
@@ -353,7 +485,6 @@ class BRKGA_Engine:
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
         
-        # Nabız Ölçer (Stagnation Counter) Değişkenleri
         stagnation_counter = 0
         last_best_fitness = float('inf')
 
@@ -366,14 +497,12 @@ class BRKGA_Engine:
                     log_console.write(f"🎉 **Gen {gen+1}:** New Best Makespan Found! `{best_solution['fitness']:.2f}` ➔ `{current_best:.2f}`")
                 best_solution = population[0].copy()
                 
-            # Stagnation Control (Tıkanıklık Kontrolü)
             if current_best < last_best_fitness - 1e-4:
                 stagnation_counter = 0
                 last_best_fitness = current_best
             else:
                 stagnation_counter += 1
                 
-            # Mass Extinction (Kıyamet Mutasyonu) Tetikleyicisi
             if use_mass_extinction and stagnation_counter >= stagnation_limit:
                 if log_console:
                     log_console.write(f"🌋 **Gen {gen+1}: Mass Extinction Triggered!** (Stagnation for {stagnation_limit} gens). Saving top {elite_survivors} elites and resetting the rest.")
@@ -385,7 +514,7 @@ class BRKGA_Engine:
                 
                 population = survivors + new_blood
                 stagnation_counter = 0
-                continue # Bu jenerasyonda çaprazlama yapma, yeni rastgeleliği değerlendir
+                continue 
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -400,7 +529,7 @@ class BRKGA_Engine:
                 parent_a = random.choice(elites)
                 parent_b = random.choice(non_elites) if non_elites else random.choice(elites)
                 child = {'route': [], 'fitness': float('inf')}
-                for i in range(self.num_cust):
+                for i in range(self.chrom_len):
                     child['route'].append(parent_a['route'][i] if random.random() < self.rho_e else parent_b['route'][i])
                 self.evaluate(child, use_2opt, use_3opt)
                 next_gen.append(child)
@@ -416,9 +545,6 @@ class BRKGA_Engine:
         return best_solution
 
 
-# ==========================================
-# 3. MODULE: HGVNS ENGINE (NUMBA ACCELERATED & DEEP INTERRUPT)
-# ==========================================
 class HGVNS_Engine:
     def __init__(self, parsed_data, custom_tsp=None):
         self.t = parsed_data.truck_time_matrix
@@ -727,55 +853,9 @@ class HGVNS_Engine:
                 
         return best_t, best_d, best_cost
 
-    def run(self, progress_bar, status_text, stop_type, stop_val):
-        if status_text: status_text.text("HGVNS: Alg 1 & 2 (Concorde Initial & Global Savings)...")
-        best_t, best_d = self.algorithm2_initial_solution()
-        best_cost = self.evaluate_cost(best_t, best_d)
-        
-        k_max = 5
-        k_shake = 1
-        no_improve_count = 0
-        iter_count = 0
-        start_time = time.time()
-        
-        while True:
-            elapsed = time.time() - start_time
-            if stop_type == "Max Iterations" and iter_count >= stop_val: break
-            if stop_type == "Time Budget (sec)" and elapsed >= stop_val: break
-            if stop_type == "No Improvement Iters" and no_improve_count >= stop_val: break
-                
-            if progress_bar:
-                if stop_type == "Max Iterations": progress_bar.progress(min(iter_count / stop_val, 1.0))
-                elif stop_type == "Time Budget (sec)": progress_bar.progress(min(elapsed / stop_val, 1.0))
-                else: progress_bar.progress(min(no_improve_count / stop_val, 1.0))
-            
-            if status_text and iter_count % 10 == 0: 
-                status_text.text(f"HGVNS Search... Iter: {iter_count} | No Improve: {no_improve_count} | Best: {best_cost:.2f}")
-
-            shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
-            
-            new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d, start_time, stop_type, stop_val)
-            
-            if new_cost < best_cost - 1e-4:
-                best_cost = new_cost
-                best_t, best_d = new_t, new_d
-                k_shake = 1
-                no_improve_count = 0
-            else:
-                k_shake += 1
-                no_improve_count += 1
-                if k_shake > k_max: k_shake = 1
-                    
-            iter_count += 1
-            
-        if progress_bar: progress_bar.progress(1.0)
-        if status_text: status_text.text(f"HGVNS Completed! Makespan: {best_cost:.2f}")
-        
-        return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
-
 
 # ==========================================
-# 4. HELPER: WAIT TIME CALCULATOR
+# 5. HELPER: WAIT TIME CALCULATOR
 # ==========================================
 def calculate_wait_times(truck_route, drone_trips, t_matrix, d_matrix):
     truck_wait = 0.0
@@ -803,7 +883,7 @@ def calculate_wait_times(truck_route, drone_trips, t_matrix, d_matrix):
 
 
 # ==========================================
-# 5. INTERACTIVE MAP (PLOTLY)
+# 6. INTERACTIVE MAP (PLOTLY)
 # ==========================================
 def draw_interactive_map(nodes_data, truck_route, drone_trips, title_prefix=""):
     fig = go.Figure()
@@ -848,6 +928,18 @@ solver_type = st.sidebar.radio("Select Algorithm:", ["BRKGA (Memetic)", "HGVNS (
 
 st.sidebar.divider()
 st.sidebar.header("BRKGA Parameters")
+
+# YENİ EKLENTİ: DECODER SEÇİMİ VE T/D AYARLARI
+st.sidebar.subheader("🧠 BRKGA Decoder Engine")
+brkga_decoder_type = st.sidebar.radio("Select Decoder:", ["Smart DP-Split (Optimal)", "Classic T/D Heuristic (Fast)"])
+
+drone_prob = 30
+look_ahead = 3
+if brkga_decoder_type == "Classic T/D Heuristic (Fast)":
+    drone_prob = st.sidebar.slider("Drone Assignment Probability (%)", 0, 100, 30, 5)
+    look_ahead = st.sidebar.slider("Rendezvous Look-Ahead Limit", 1, 5, 3, 1)
+
+st.sidebar.divider()
 pop_size = st.sidebar.slider("Population (p)", 50, 500, 300, 10)
 elite_ratio = st.sidebar.slider("Elite Ratio (p_e %)", 5, 40, 20, 5)
 mutant_ratio = st.sidebar.slider("Mutant Ratio (p_m %)", 5, 40, 15, 5)
@@ -859,7 +951,6 @@ use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
 use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
 st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
 
-# YENİ EKLENTİ: MASS EXTINCTION ARAYÜZÜ
 st.sidebar.divider()
 st.sidebar.subheader("🧬 Advanced Evolutionary Features")
 use_mass_extinction = st.sidebar.checkbox("Enable Mass Extinction (Partial Reinitialization)", value=False)
@@ -974,6 +1065,14 @@ else:
         if st.button("🚀 START OPTIMIZATION", type="primary"):
             st.divider()
             
+            # Dinamik Decoder Seçimi
+            if brkga_decoder_type == "Smart DP-Split (Optimal)":
+                active_decoder = DPSplitDecoder(parsed_data)
+                active_chrom_len = parsed_data.num_nodes - 1
+            else:
+                active_decoder = SmartTDDecoder(parsed_data, drone_prob, look_ahead)
+                active_chrom_len = (parsed_data.num_nodes - 1) * 2
+            
             if solver_type == "Benchmark (Run Both)":
                 st.subheader("⚔️ Benchmark Arena: Head-to-Head")
                 col_b, col_h = st.columns(2)
@@ -987,7 +1086,7 @@ else:
                     log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                     
                     start_time = time.time()
-                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(
+                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, active_decoder, active_chrom_len).run(
                         pb_b, st_txt_b, use_2opt, use_3opt, use_mass_extinction, stagnation_limit, elite_survivors, log_b
                     )
                     time_b = time.time() - start_time
@@ -1073,7 +1172,7 @@ else:
                 log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                 
                 start_time = time.time()
-                sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(
+                sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, active_decoder, active_chrom_len).run(
                     pb, st_txt, use_2opt, use_3opt, use_mass_extinction, stagnation_limit, elite_survivors, log_b
                 )
                 elapsed = time.time() - start_time
