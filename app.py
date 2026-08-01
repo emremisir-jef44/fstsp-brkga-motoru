@@ -188,7 +188,6 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
 
     return cost[N-1], path_prev, path_drone, seq
 
-# HGVNS İçin Strateji C: Numba ile ışık hızında C++ Maliyet Değerlendirmesi
 @njit
 def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max_fly):
     M = len(drone_trips)
@@ -234,7 +233,6 @@ def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max
         trip_r_idx[i] = r_idx
         trip_dt[i] = dt
 
-    # Kronolojik sıralama
     for i in range(M - 1):
         for j in range(i + 1, M):
             if trip_l_idx[i] > trip_l_idx[j]:
@@ -242,7 +240,6 @@ def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max
                 trip_r_idx[i], trip_r_idx[j] = trip_r_idx[j], trip_r_idx[i]
                 trip_dt[i], trip_dt[j] = trip_dt[j], trip_dt[i]
 
-    # Nested/Overlapping engelleme
     for i in range(M - 1):
         if trip_l_idx[i + 1] < trip_r_idx[i]:
             return np.inf
@@ -404,17 +401,14 @@ class HGVNS_Engine:
         self.max_fly = parsed_data.max_fly
         self.novisit_list = parsed_data.novisit_list
         self.custom_tsp = custom_tsp
-        # Hafıza sözlüğünü (eval_memo) RAM patlamasını engellemek için tamamen sildik!
 
     def evaluate_cost(self, truck_route, drone_trips):
-        # Listeleri saf C++ işleme gücü (Numba) için Numpy Array'e çeviriyoruz
         t_arr = np.array(truck_route, dtype=np.int32)
         if len(drone_trips) > 0:
             d_arr = np.array(drone_trips, dtype=np.int32)
         else:
             d_arr = np.zeros((0, 3), dtype=np.int32)
             
-        # Hafızaya sormadan direkt vahşi CPU gücüyle anında hesapla!
         return fast_eval_hgvns(t_arr, d_arr, self.t, self.d, self.num_nodes, self.max_fly)
 
     def get_valid_shake(self, base_t, base_d, k_shake):
@@ -502,7 +496,6 @@ class HGVNS_Engine:
         
         k = 0
         while k < 7:
-            # STRATEJİ A: Derin Acil Durum Freni (Zaman kontrolü)
             if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
                 return best_t, best_d, best_cost
                 
@@ -578,7 +571,6 @@ class HGVNS_Engine:
 
             elif n_idx == 4: 
                 for i in range(1, len(best_t)-2):
-                    # Strateji A: Ağır tünelde saat kontrolü
                     if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
                         return best_t, best_d, best_cost
                     for j in range(1, len(best_t)-1):
@@ -629,7 +621,6 @@ class HGVNS_Engine:
 
             elif n_idx == 7: 
                 for i in range(1, len(best_t)-1):
-                    # Strateji A: En ağır döngüde fren kontrolü
                     if stop_type == "Time Budget (sec)" and time.time() - start_time >= stop_val:
                         return best_t, best_d, best_cost
                         
@@ -737,7 +728,6 @@ class HGVNS_Engine:
 
             shaken_t, shaken_d = self.get_valid_shake(best_t, best_d, k_shake)
             
-            # Acil Durum Freni için start_time ve kısıtları fonksiyona gönderiyoruz
             new_t, new_d, new_cost = self.algorithm4_rvnd(shaken_t, shaken_d, start_time, stop_type, stop_val)
             
             if new_cost < best_cost - 1e-4:
@@ -757,8 +747,37 @@ class HGVNS_Engine:
         
         return {'fitness': best_cost, 'truck_route': best_t, 'drone_trips': best_d}
 
+
 # ==========================================
-# 4. INTERACTIVE MAP (PLOTLY)
+# 4. HELPER: WAIT TIME CALCULATOR
+# ==========================================
+def calculate_wait_times(truck_route, drone_trips, t_matrix, d_matrix):
+    truck_wait = 0.0
+    drone_wait = 0.0
+    
+    idx_map = {node: i for i, node in enumerate(truck_route)}
+    
+    for l, n, r in drone_trips:
+        dt = d_matrix[l][n] + d_matrix[n][r]
+        
+        l_idx = idx_map.get(l, -1)
+        r_idx = idx_map.get(r, -1)
+        
+        if l_idx != -1 and r_idx != -1 and l_idx < r_idx:
+            tt = 0.0
+            for k in range(l_idx, r_idx):
+                tt += t_matrix[truck_route[k]][truck_route[k+1]]
+                
+            if dt > tt:
+                truck_wait += (dt - tt)
+            else:
+                drone_wait += (tt - dt)
+                
+    return truck_wait, drone_wait
+
+
+# ==========================================
+# 5. INTERACTIVE MAP (PLOTLY)
 # ==========================================
 def draw_interactive_map(nodes_data, truck_route, drone_trips, title_prefix=""):
     fig = go.Figure()
@@ -973,6 +992,17 @@ else:
                     c_rep4.info(f"💰 **Savings vs Baseline TSP**\n\nBRKGA: **{b_savings:.1f}%**\n\nHGVNS: **{h_savings:.1f}%**")
                 
                 st.write("---")
+                
+                # Yeni Eklenti: Bekleme Süreleri Raporu
+                cw1, cw2 = st.columns(2)
+                t_wait_b, d_wait_b = calculate_wait_times(sol_b['truck_route'], sol_b['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
+                t_wait_h, d_wait_h = calculate_wait_times(sol_h['truck_route'], sol_h['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
+                
+                cw1.info(f"⏳ **BRKGA Wait Times (Idle)**\n\n🚚 Truck Waited: **{t_wait_b:.2f}**\n\n🚁 Drone Waited: **{d_wait_b:.2f}**")
+                cw2.info(f"⏳ **HGVNS Wait Times (Idle)**\n\n🚚 Truck Waited: **{t_wait_h:.2f}**\n\n🚁 Drone Waited: **{d_wait_h:.2f}**")
+
+                st.write("---")
+                
                 col_r1, col_r2 = st.columns(2)
                 with col_r1:
                     st.markdown("#### 🟦 BRKGA Routes")
@@ -1012,10 +1042,15 @@ else:
                 sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb, st_txt, use_2opt, use_3opt, log_b)
                 elapsed = time.time() - start_time
                 
-                metric_placeholder.metric("Makespan", f"{sol['fitness']:.2f}")
-                c2, c3 = st.columns(2)
+                t_w, d_w = calculate_wait_times(sol['truck_route'], sol['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
+                
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Makespan", f"{sol['fitness']:.2f}")
                 c2.metric("Time", f"{elapsed:.2f} s")
-                c3.metric("Drone Trips", len(sol['drone_trips']))
+                c3.metric("Trips", len(sol['drone_trips']))
+                c4.metric("🚚 Wait Time", f"{t_w:.2f}")
+                c5.metric("🚁 Wait Time", f"{d_w:.2f}")
+
                 map_placeholder.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "BRKGA"), use_container_width=True)
                 
                 st.markdown("#### 📝 Route Details")
@@ -1038,10 +1073,15 @@ else:
                 sol = HGVNS_Engine(parsed_data, custom_tsp=parsed_tsp).run(pb, st_txt, hgvns_stop_type, hgvns_stop_val)
                 elapsed = time.time() - start_time
                 
-                c1, c2, c3 = st.columns(3)
+                t_w, d_w = calculate_wait_times(sol['truck_route'], sol['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
+                
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Makespan", f"{sol['fitness']:.2f}")
                 c2.metric("Time", f"{elapsed:.2f} s")
-                c3.metric("Drone Trips", len(sol['drone_trips']))
+                c3.metric("Trips", len(sol['drone_trips']))
+                c4.metric("🚚 Wait Time", f"{t_w:.2f}")
+                c5.metric("🚁 Wait Time", f"{d_w:.2f}")
+
                 st.plotly_chart(draw_interactive_map(parsed_data.nodes, sol['truck_route'], sol['drone_trips'], "HGVNS"), use_container_width=True)
                 
                 st.markdown("#### 📝 Route Details")
