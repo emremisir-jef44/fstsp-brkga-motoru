@@ -188,6 +188,7 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
 
     return cost[N-1], path_prev, path_drone, seq
 
+
 @njit
 def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly, drone_prob, look_ahead):
     customers = np.arange(1, num_nodes)
@@ -197,11 +198,11 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
     labels = np.zeros(len(seq), dtype=np.int32) # 0 = T, 1 = D
     for i in range(len(seq)):
         cust = seq[i]
-        # Statik Tamir: NOVISIT ise uçurma
+        # Statik Tamir: NOVISIT ise D atama
         if td_rk[i] < drone_prob and not novisit_mask[cust]:
             labels[i] = 1 
 
-    # Kılavuz Tamiri: Ardışık 'D' leri engelle
+    # Ardışık D'leri engelle
     for i in range(len(labels) - 1):
         if labels[i] == 1 and labels[i+1] == 1:
             labels[i+1] = 0
@@ -223,63 +224,109 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
     drone_trips_r = np.zeros(N, dtype=np.int32)
     drone_count = 0
 
-    i = 1
-    last_T_idx = 0
+    curr_T_idx = 0
 
-    while i < N:
-        if full_labels[i] == 0: # Truck
-            truck_route_arr[truck_count] = full_seq[i]
-            truck_count += 1
-            cost += t_matrix[full_seq[last_T_idx], full_seq[i]]
-            last_T_idx = i
-            i += 1
-        else: # Drone
-            n_prev = full_seq[last_T_idx]
-            n_D = full_seq[i]
-
-            best_j = -1
-            best_seg_time = np.inf
-
-            # İleriye Bakış (Look-Ahead / Interval Launch) Sınırı
-            limit = i + 1 + look_ahead
-            if limit > N: limit = N
-
-            for j in range(i + 1, limit):
-                n_next = full_seq[j]
-                d_time = d_matrix[n_prev, n_D] + d_matrix[n_D, n_next]
-
-                if d_time <= max_fly:
-                    t_time = 0.0
-                    curr_t = n_prev
-                    for k in range(i + 1, j + 1):
-                        t_time += t_matrix[curr_t, full_seq[k]]
-                        curr_t = full_seq[k]
-
-                    seg_time = max(d_time, t_time)
-                    if seg_time < best_seg_time:
-                        best_seg_time = seg_time
-                        best_j = j
-
-            if best_j != -1:
-                # Dinamik Onay: Geçerli İniş Bulundu!
-                cost += best_seg_time
-                drone_trips_l[drone_count] = n_prev
-                drone_trips_n[drone_count] = n_D
-                drone_trips_r[drone_count] = full_seq[best_j]
-                drone_count += 1
-
-                # Arada kalan tüm duraklar (interval launch) zorunlu olarak Kamyon (T) tarafından gezilir
-                for k in range(i + 1, best_j + 1):
-                    truck_route_arr[truck_count] = full_seq[k]
-                    truck_count += 1
-
-                last_T_idx = best_j
-                i = best_j + 1
-            else:
-                # Dinamik Tamir: MAXFLY yetmedi, D'yi T'ye çevir ve loop'u tekrarlat
-                full_labels[i] = 0
+    while curr_T_idx < N - 1:
+        # Sonraki D noktasını bul
+        d_idx = -1
+        for i in range(curr_T_idx + 1, N - 1):
+            if full_labels[i] == 1:
+                d_idx = i
+                break
+                
+        if d_idx == -1:
+            # Başka D yoksa kalanları kamyonla gez
+            for i in range(curr_T_idx + 1, N):
+                cost += t_matrix[full_seq[curr_T_idx], full_seq[i]]
+                truck_route_arr[truck_count] = full_seq[i]
+                truck_count += 1
+                curr_T_idx = i
+            break
+            
+        # Olası en uzak iniş noktasını bul (diğer D'nin üstüne atlamamak için)
+        next_d_idx = N - 1
+        for i in range(d_idx + 1, N - 1):
+            if full_labels[i] == 1:
+                next_d_idx = i
+                break
+                
+        best_launch = -1
+        best_rend = -1
+        best_proj_cost = np.inf
+        best_block_cost = np.inf
+        
+        # Look-ahead limiti
+        max_rend = min(N - 1, d_idx + look_ahead)
+        if max_rend >= next_d_idx:
+            max_rend = next_d_idx - 1
+        if max_rend < d_idx + 1:
+            max_rend = d_idx + 1 
+            
+        ref_node = max_rend
+            
+        # Tüm olası (Kalkış, İniş) kombinasyonlarını tara (Interval Scanning)
+        for l in range(curr_T_idx, d_idx):
+            for r in range(d_idx + 1, max_rend + 1):
+                n_L = full_seq[l]
+                n_D = full_seq[d_idx]
+                n_R = full_seq[r]
+                d_time = d_matrix[n_L, n_D] + d_matrix[n_D, n_R]
+                
+                if d_time > max_fly:
+                    continue
+                    
+                # Kamyonun curr_T_idx'den Kalkış'a gitme süresi
+                t_pre = 0.0
+                prev = full_seq[curr_T_idx]
+                for k in range(curr_T_idx + 1, l + 1):
+                    t_pre += t_matrix[prev, full_seq[k]]
+                    prev = full_seq[k]
+                    
+                # Kamyonun Kalkış'tan İniş'e gitme süresi (D'yi atlayarak)
+                t_mid = 0.0
+                prev = full_seq[l]
+                for k in range(l + 1, r + 1):
+                    if k == d_idx: continue
+                    t_mid += t_matrix[prev, full_seq[k]]
+                    prev = full_seq[k]
+                    
+                block_cost = t_pre + max(d_time, t_mid)
+                
+                # Adil kıyaslama için ref_node'a kadar olan maliyeti yansıt
+                t_post = 0.0
+                prev = full_seq[r]
+                for k in range(r + 1, ref_node + 1):
+                    t_post += t_matrix[prev, full_seq[k]]
+                    prev = full_seq[k]
+                    
+                proj_cost = block_cost + t_post
+                
+                if proj_cost < best_proj_cost:
+                    best_proj_cost = proj_cost
+                    best_block_cost = block_cost
+                    best_launch = l
+                    best_rend = r
+                    
+        if best_launch != -1:
+            # En kârlı kombinasyonu uygula!
+            for k in range(curr_T_idx + 1, best_rend + 1):
+                if k == d_idx: continue
+                truck_route_arr[truck_count] = full_seq[k]
+                truck_count += 1
+                
+            drone_trips_l[drone_count] = full_seq[best_launch]
+            drone_trips_n[drone_count] = full_seq[d_idx]
+            drone_trips_r[drone_count] = full_seq[best_rend]
+            drone_count += 1
+            
+            cost += best_block_cost
+            curr_T_idx = best_rend
+        else:
+            # MAXFLY yetmedi! D'yi T'ye çevir ve loop'u baştan sar
+            full_labels[d_idx] = 0
 
     return cost, truck_route_arr[:truck_count], drone_trips_l[:drone_count], drone_trips_n[:drone_count], drone_trips_r[:drone_count]
+
 
 @njit
 def fast_eval_hgvns(truck_route, drone_trips, t_matrix, d_matrix, num_nodes, max_fly):
@@ -930,7 +977,6 @@ solver_type = st.sidebar.radio("Select Algorithm:", ["BRKGA (Memetic)", "HGVNS (
 st.sidebar.divider()
 st.sidebar.header("BRKGA Parameters")
 
-# YENİ EKLENTİ: DECODER SEÇİMİ VE T/D AYARLARI
 st.sidebar.subheader("🧠 BRKGA Decoder Engine")
 brkga_decoder_type = st.sidebar.radio("Select Decoder:", ["Smart DP-Split (Optimal)", "Classic T/D Heuristic (Fast)"])
 
@@ -1066,7 +1112,6 @@ else:
         if st.button("🚀 START OPTIMIZATION", type="primary"):
             st.divider()
             
-            # Dinamik Decoder Seçimi
             if brkga_decoder_type == "Smart DP-Split (Optimal)":
                 active_decoder = DPSplitDecoder(parsed_data)
                 active_chrom_len = parsed_data.num_nodes - 1
