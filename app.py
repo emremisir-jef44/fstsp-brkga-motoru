@@ -346,20 +346,46 @@ class BRKGA_Engine:
         ind['truck_route'] = t_route
         ind['drone_trips'] = d_trips
 
-    def run(self, progress_bar, status_text, use_2opt, use_3opt, log_console=None):
+    def run(self, progress_bar, status_text, use_2opt, use_3opt, use_mass_extinction=False, stagnation_limit=20, elite_survivors=3, log_console=None):
         if log_console: log_console.write("🧬 **BRKGA Engine Initialized:** Creating initial population...")
         population = [self.create_individual() for _ in range(self.p)]
         
         for ind in population: self.evaluate(ind, use_2opt, use_3opt)
         best_solution = None
+        
+        # Nabız Ölçer (Stagnation Counter) Değişkenleri
+        stagnation_counter = 0
+        last_best_fitness = float('inf')
 
         for gen in range(self.max_gen):
             population.sort(key=lambda x: x['fitness'])
+            current_best = population[0]['fitness']
             
-            if best_solution is None or population[0]['fitness'] < best_solution['fitness']:
+            if best_solution is None or current_best < best_solution['fitness']:
                 if best_solution is not None and log_console:
-                    log_console.write(f"🎉 **Gen {gen+1}:** New Best Makespan Found! `{best_solution['fitness']:.2f}` ➔ `{population[0]['fitness']:.2f}`")
+                    log_console.write(f"🎉 **Gen {gen+1}:** New Best Makespan Found! `{best_solution['fitness']:.2f}` ➔ `{current_best:.2f}`")
                 best_solution = population[0].copy()
+                
+            # Stagnation Control (Tıkanıklık Kontrolü)
+            if current_best < last_best_fitness - 1e-4:
+                stagnation_counter = 0
+                last_best_fitness = current_best
+            else:
+                stagnation_counter += 1
+                
+            # Mass Extinction (Kıyamet Mutasyonu) Tetikleyicisi
+            if use_mass_extinction and stagnation_counter >= stagnation_limit:
+                if log_console:
+                    log_console.write(f"🌋 **Gen {gen+1}: Mass Extinction Triggered!** (Stagnation for {stagnation_limit} gens). Saving top {elite_survivors} elites and resetting the rest.")
+                
+                survivors = population[:elite_survivors]
+                new_blood = [self.create_individual() for _ in range(self.p - elite_survivors)]
+                for ind in new_blood:
+                    self.evaluate(ind, use_2opt, use_3opt)
+                
+                population = survivors + new_blood
+                stagnation_counter = 0
+                continue # Bu jenerasyonda çaprazlama yapma, yeni rastgeleliği değerlendir
                 
             next_gen = population[:self.p_e]
             elites = population[:self.p_e]
@@ -833,6 +859,13 @@ use_2opt = st.sidebar.checkbox("Enable 2-Opt Local Search", value=False)
 use_3opt = st.sidebar.checkbox("Enable 3-Opt Local Search", value=False)
 st.sidebar.caption("⚠️ Pro Tip: 3-Opt is computationally heavy. Safe mode (PMA) is active.")
 
+# YENİ EKLENTİ: MASS EXTINCTION ARAYÜZÜ
+st.sidebar.divider()
+st.sidebar.subheader("🧬 Advanced Evolutionary Features")
+use_mass_extinction = st.sidebar.checkbox("Enable Mass Extinction (Partial Reinitialization)", value=False)
+stagnation_limit = st.sidebar.number_input("Stagnation Limit (Generations)", min_value=5, max_value=100, value=20, step=5)
+elite_survivors = st.sidebar.number_input("Noah's Ark (Elites to save)", min_value=1, max_value=10, value=3, step=1)
+
 st.sidebar.divider()
 st.sidebar.header("HGVNS Parameters")
 hgvns_stop_type = st.sidebar.radio("Stopping Condition", ["Max Iterations", "Time Budget (sec)", "No Improvement Iters"])
@@ -954,7 +987,9 @@ else:
                     log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                     
                     start_time = time.time()
-                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb_b, st_txt_b, use_2opt, use_3opt, log_b)
+                    sol_b = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(
+                        pb_b, st_txt_b, use_2opt, use_3opt, use_mass_extinction, stagnation_limit, elite_survivors, log_b
+                    )
                     time_b = time.time() - start_time
                     
                     metric_placeholder_b.metric("BRKGA Makespan", f"{sol_b['fitness']:.2f}", f"{time_b:.2f} s", delta_color="off")
@@ -993,7 +1028,6 @@ else:
                 
                 st.write("---")
                 
-                # Yeni Eklenti: Bekleme Süreleri Raporu
                 cw1, cw2 = st.columns(2)
                 t_wait_b, d_wait_b = calculate_wait_times(sol_b['truck_route'], sol_b['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
                 t_wait_h, d_wait_h = calculate_wait_times(sol_h['truck_route'], sol_h['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
@@ -1039,7 +1073,9 @@ else:
                 log_b = st.expander("🔍 Inside the BRKGA Brain (Live Process Logs)", expanded=False)
                 
                 start_time = time.time()
-                sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(pb, st_txt, use_2opt, use_3opt, log_b)
+                sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, DPSplitDecoder(parsed_data)).run(
+                    pb, st_txt, use_2opt, use_3opt, use_mass_extinction, stagnation_limit, elite_survivors, log_b
+                )
                 elapsed = time.time() - start_time
                 
                 t_w, d_w = calculate_wait_times(sol['truck_route'], sol['drone_trips'], parsed_data.truck_time_matrix, parsed_data.drone_time_matrix)
