@@ -9,12 +9,18 @@ import os
 import re
 
 # ==========================================
-# NUMBA CHECK (FOR C++ LEVEL SPEED)
+# PANDAS & NUMBA CHECK
 # ==========================================
 try:
     from numba import njit
 except ImportError:
     st.error("⚠️ ERROR: 'numba' library is missing! Please type 'pip install numba'.")
+    st.stop()
+
+try:
+    import pandas as pd
+except ImportError:
+    st.error("⚠️ ERROR: 'pandas' library is missing! Please type 'pip install pandas'.")
     st.stop()
 
 # ==========================================
@@ -80,6 +86,50 @@ class FSTSP_Parser:
                     t_matrix[i][j] = dist * self.truck_speed
                     d_matrix[i][j] = dist * self.drone_speed
         return t_matrix, d_matrix
+
+# ==========================================
+# HELPER: TSP LOADER
+# ==========================================
+def load_custom_tsp(selected_file, parsed_data):
+    base_name = os.path.splitext(selected_file)[0]
+    possible_folders = ["solutions", os.path.join("datasets", "solutions")]
+    sol_folder = None
+    for folder in possible_folders:
+        if os.path.exists(folder):
+            sol_folder = folder
+            break
+            
+    if not sol_folder: return None
+    
+    tsp_path = None
+    for ext in [".txt", "", "-tsp.txt", "-tsp"]:
+        temp_path = os.path.join(sol_folder, f"{base_name}-tsp{ext}")
+        if os.path.exists(temp_path):
+            tsp_path = temp_path
+            break
+        temp_path2 = os.path.join(sol_folder, f"{base_name}{ext}")
+        if os.path.exists(temp_path2):
+            tsp_path = temp_path2
+            break
+            
+    if tsp_path:
+        try:
+            with open(tsp_path, 'r') as f:
+                lines = f.readlines()
+            route = []
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('/*'): continue
+                parts = line.split()
+                if len(parts) >= 3:
+                    route.append(int(parts[0]))
+            route.append(0) 
+            
+            if len(set(route)) == parsed_data.num_nodes and len(route) == parsed_data.num_nodes + 1:
+                return route
+        except:
+            pass
+    return None
 
 # ==========================================
 # 2. MODULE: FAST EVALUATORS & DECODERS (NUMBA)
@@ -188,20 +238,18 @@ def numba_fast_dp_decode(rk_route, t_matrix, d_matrix, num_nodes, novisit_mask, 
 
     return cost[N-1], path_prev, path_drone, seq
 
-
 @njit
 def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisit_mask, max_fly, drone_prob, look_ahead, unlimited_look_ahead):
     customers = np.arange(1, num_nodes)
     sorted_indices = np.argsort(route_rk)
     seq = customers[sorted_indices]
 
-    labels = np.zeros(len(seq), dtype=np.int32) # 0 = T, 1 = D
+    labels = np.zeros(len(seq), dtype=np.int32)
     for i in range(len(seq)):
         cust = seq[i]
         if td_rk[i] < drone_prob and not novisit_mask[cust]:
             labels[i] = 1 
 
-    # Ardışık D'leri engelle
     for i in range(len(labels) - 1):
         if labels[i] == 1 and labels[i+1] == 1:
             labels[i+1] = 0
@@ -251,7 +299,6 @@ def fast_heuristic_decode(route_rk, td_rk, t_matrix, d_matrix, num_nodes, novisi
         best_proj_cost = np.inf
         best_block_cost = np.inf
         
-        # Look-ahead veya sınırsız (bir sonraki D'ye kadar) tarama mantığı
         if unlimited_look_ahead:
             max_rend = next_d_idx - 1
         else:
@@ -963,8 +1010,13 @@ def natural_sort_key(s):
 st.set_page_config(page_title="FSTSP Benchmark Arena", layout="wide")
 st.title("🏆 FSTSP Benchmark Arena: BRKGA vs HGVNS")
 
-st.sidebar.header("⚙️ Solver Engine Selection")
-solver_type = st.sidebar.radio("Select Algorithm:", ["BRKGA (Memetic)", "HGVNS (Paper Replica)", "Benchmark (Run Both)"])
+# APP MODE SELECTION
+st.sidebar.header("🛠️ Application Mode")
+app_mode = st.sidebar.radio("Select Mode:", ["🗺️ Single Visualizer", "📊 Batch Experiment (Tables)"])
+
+if app_mode == "🗺️ Single Visualizer":
+    st.sidebar.header("⚙️ Solver Engine Selection")
+    solver_type = st.sidebar.radio("Select Algorithm:", ["BRKGA (Memetic)", "HGVNS (Paper Replica)", "Benchmark (Run Both)"])
 
 st.sidebar.divider()
 st.sidebar.header("BRKGA Parameters")
@@ -998,22 +1050,22 @@ use_mass_extinction = st.sidebar.checkbox("Enable Mass Extinction (Partial Reini
 stagnation_limit = st.sidebar.number_input("Stagnation Limit (Generations)", min_value=5, max_value=100, value=20, step=5)
 elite_survivors = st.sidebar.number_input("Noah's Ark (Elites to save)", min_value=1, max_value=10, value=3, step=1)
 
-st.sidebar.divider()
-st.sidebar.header("HGVNS Parameters")
-hgvns_stop_type = st.sidebar.radio("Stopping Condition", ["Max Iterations", "Time Budget (sec)", "No Improvement Iters"])
-if hgvns_stop_type == "Max Iterations":
-    hgvns_stop_val = st.sidebar.number_input("Max Iterations limit", value=100, min_value=1, step=10)
-elif hgvns_stop_type == "Time Budget (sec)":
-    hgvns_stop_val = st.sidebar.number_input("Time Budget limit", value=10, min_value=1, step=1)
-else:
-    hgvns_stop_val = st.sidebar.number_input("No-Improvement limit", value=25, min_value=1, step=5)
+if app_mode == "🗺️ Single Visualizer":
+    st.sidebar.divider()
+    st.sidebar.header("HGVNS Parameters")
+    hgvns_stop_type = st.sidebar.radio("Stopping Condition", ["Max Iterations", "Time Budget (sec)", "No Improvement Iters"])
+    if hgvns_stop_type == "Max Iterations":
+        hgvns_stop_val = st.sidebar.number_input("Max Iterations limit", value=100, min_value=1, step=10)
+    elif hgvns_stop_type == "Time Budget (sec)":
+        hgvns_stop_val = st.sidebar.number_input("Time Budget limit", value=10, min_value=1, step=1)
+    else:
+        hgvns_stop_val = st.sidebar.number_input("No-Improvement limit", value=25, min_value=1, step=5)
 
 st.sidebar.divider()
 st.sidebar.header("Advanced / Paper Tricks")
 use_custom_tsp = st.sidebar.checkbox("Auto-Load Optimal TSP Route (Concorde)", value=True)
-parsed_tsp = None
 
-st.subheader("1. Dataset Selection")
+# Dataset Loading Logic
 dataset_folder = "datasets"
 if os.path.exists(dataset_folder):
     available_files = [f for f in os.listdir(dataset_folder) if f.endswith('.txt')]
@@ -1023,7 +1075,113 @@ else:
 
 if not available_files:
     st.error("⚠️ 'datasets' folder is empty!")
-else:
+    st.stop()
+
+
+# ==========================================
+# MODE 1: BATCH EXPERIMENT (TABLES)
+# ==========================================
+if app_mode == "📊 Batch Experiment (Tables)":
+    st.subheader("🧪 Batch Experiment Mode (BRKGA vs Baseline TSP)")
+    st.markdown("Run multiple datasets consecutively and generate academic-style tables.")
+    
+    col_ds, col_rep = st.columns([3, 1])
+    with col_ds:
+        selected_files = st.multiselect("Select Datasets to Run:", available_files, default=available_files[:3] if len(available_files) > 3 else available_files)
+    with col_rep:
+        num_replications = st.number_input("Replications per Dataset", min_value=1, max_value=50, value=5, step=1)
+
+    if st.button("🚀 START BATCH EXPERIMENT", type="primary"):
+        if not selected_files:
+            st.warning("Please select at least one dataset.")
+        else:
+            st.divider()
+            results_data = []
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            total_runs = len(selected_files) * num_replications
+            current_run = 0
+            
+            for file in selected_files:
+                with open(os.path.join(dataset_folder, file), 'r', encoding='utf-8') as f:
+                    parsed_data = FSTSP_Parser(f.read())
+                    
+                baseline_tsp_cost = 0.0
+                if use_custom_tsp:
+                    tsp_route = load_custom_tsp(file, parsed_data)
+                    if tsp_route:
+                        for i in range(len(tsp_route) - 1):
+                            baseline_tsp_cost += parsed_data.truck_time_matrix[tsp_route[i]][tsp_route[i+1]]
+                            
+                if brkga_decoder_type == "Smart DP-Split (Optimal)":
+                    active_decoder = DPSplitDecoder(parsed_data)
+                    active_chrom_len = parsed_data.num_nodes - 1
+                else:
+                    active_decoder = SmartTDDecoder(parsed_data, drone_prob, look_ahead, unlimited_look_ahead)
+                    active_chrom_len = (parsed_data.num_nodes - 1) * 2
+                    
+                file_best_score = float('inf')
+                file_scores = []
+                file_times = []
+                
+                for rep in range(num_replications):
+                    status_text.text(f"Running {file} - Replication {rep+1}/{num_replications}...")
+                    
+                    start_time = time.time()
+                    sol = BRKGA_Engine(pop_size, elite_ratio, mutant_ratio, rho_e, max_gen, active_decoder, active_chrom_len).run(
+                        None, None, use_2opt, use_3opt, use_mass_extinction, stagnation_limit, elite_survivors, None
+                    )
+                    elapsed = time.time() - start_time
+                    
+                    file_scores.append(sol['fitness'])
+                    file_times.append(elapsed)
+                    if sol['fitness'] < file_best_score:
+                        file_best_score = sol['fitness']
+                        
+                    current_run += 1
+                    progress_bar.progress(current_run / total_runs)
+                    
+                avg_score = np.mean(file_scores)
+                avg_time = np.mean(file_times)
+                
+                gap_best = ((baseline_tsp_cost - file_best_score) / baseline_tsp_cost * 100) if baseline_tsp_cost > 0 else 0
+                gap_avg = ((baseline_tsp_cost - avg_score) / baseline_tsp_cost * 100) if baseline_tsp_cost > 0 else 0
+                
+                results_data.append({
+                    "Instance": file.replace(".txt", ""),
+                    "N": parsed_data.num_nodes,
+                    "TSP Baseline": round(baseline_tsp_cost, 2) if baseline_tsp_cost > 0 else "N/A",
+                    "BRKGA Best": round(file_best_score, 2),
+                    "BRKGA Avg": round(avg_score, 2),
+                    "Gap (Best) %": round(gap_best, 2) if baseline_tsp_cost > 0 else "N/A",
+                    "Gap (Avg) %": round(gap_avg, 2) if baseline_tsp_cost > 0 else "N/A",
+                    "Avg CPU Time (s)": round(avg_time, 2),
+                    "Runs": num_replications
+                })
+                
+            progress_bar.progress(1.0)
+            status_text.success("✅ Batch Experiment Completed Successfully!")
+            
+            df_results = pd.DataFrame(results_data)
+            st.dataframe(df_results, use_container_width=True)
+            
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Export Results to CSV",
+                data=csv,
+                file_name="brkga_batch_results.csv",
+                mime="text/csv",
+                type="primary"
+            )
+
+
+# ==========================================
+# MODE 2: SINGLE VISUALIZER
+# ==========================================
+elif app_mode == "🗺️ Single Visualizer":
+    st.subheader("1. Dataset Selection")
     st.write("**Filter by Category:**")
     category = st.radio("Category Filter", ["All", "Uniform", "Single Center", "Double Center", "Restricted"], horizontal=True, label_visibility="collapsed")
     
@@ -1047,49 +1205,13 @@ else:
         with open(os.path.join(dataset_folder, selected_file), 'r', encoding='utf-8') as f:
             parsed_data = FSTSP_Parser(f.read())
             
+        parsed_tsp = None
         if use_custom_tsp:
-            base_name = os.path.splitext(selected_file)[0]
-            possible_folders = ["solutions", os.path.join("datasets", "solutions")]
-            sol_folder = None
-            for folder in possible_folders:
-                if os.path.exists(folder):
-                    sol_folder = folder
-                    break
-            
-            tsp_path = None
-            if sol_folder:
-                for ext in [".txt", "", "-tsp.txt", "-tsp"]:
-                    temp_path = os.path.join(sol_folder, f"{base_name}-tsp{ext}")
-                    if os.path.exists(temp_path):
-                        tsp_path = temp_path
-                        break
-                    temp_path2 = os.path.join(sol_folder, f"{base_name}{ext}")
-                    if os.path.exists(temp_path2):
-                        tsp_path = temp_path2
-                        break
-            
-            if tsp_path:
-                try:
-                    with open(tsp_path, 'r') as f:
-                        lines = f.readlines()
-                    route = []
-                    for line in lines:
-                        line = line.strip()
-                        if not line or line.startswith('/*'): continue
-                        parts = line.split()
-                        if len(parts) >= 3:
-                            route.append(int(parts[0]))
-                    route.append(0) 
-                    
-                    if len(set(route)) == parsed_data.num_nodes and len(route) == parsed_data.num_nodes + 1:
-                        parsed_tsp = route
-                        st.sidebar.success(f"✅ Loaded Concorde TSP: {os.path.basename(tsp_path)}")
-                    else:
-                        st.sidebar.error("❌ Mismatch between TSP file and Dataset nodes.")
-                except Exception as e:
-                    st.sidebar.error(f"Error reading TSP file: {e}")
+            parsed_tsp = load_custom_tsp(selected_file, parsed_data)
+            if parsed_tsp:
+                st.sidebar.success(f"✅ Loaded Concorde TSP automatically.")
             else:
-                st.sidebar.warning(f"⚠️ TSP solution not found for {base_name}!")
+                st.sidebar.warning(f"⚠️ TSP solution not found!")
 
         baseline_tsp_cost = 0.0
         if parsed_tsp:
