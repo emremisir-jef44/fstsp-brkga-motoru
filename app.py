@@ -1147,6 +1147,246 @@ def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix, nodes_data):
 
 
 # ==========================================
+# ROUTE STRUCTURE SCHEMATIC
+# ==========================================
+def draw_route_structure_schematic(
+    nodes_data,
+    truck_route,
+    drone_trips,
+    t_matrix,
+    d_matrix,
+    label_mode="Distance",
+    title="Truck–Drone Route Structure",
+):
+    """Draw a schematic route: truck nodes horizontally, drone customers above."""
+    route = [int(node) for node in truck_route]
+    trips = [(int(l), int(n), int(r)) for l, n, r in drone_trips]
+
+    if len(route) < 2:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(title=title)
+        return empty_fig
+
+    coordinates = {
+        int(node_id): (float(x_coord), float(y_coord))
+        for node_id, x_coord, y_coord in nodes_data
+    }
+
+    # Non-depot customers appear once in a valid truck route. Depot 0 appears
+    # at both ends and is handled according to launch/rendezvous role.
+    truck_position = {
+        int(node): index
+        for index, node in enumerate(route)
+        if int(node) != 0
+    }
+
+    def route_index(node, rendezvous=False):
+        node = int(node)
+        if node == 0:
+            return len(route) - 1 if rendezvous else 0
+        return truck_position.get(node, -1)
+
+    def euclidean_distance(node_a, node_b):
+        x1, y1 = coordinates[int(node_a)]
+        x2, y2 = coordinates[int(node_b)]
+        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
+    def edge_label(node_a, node_b, travel_time):
+        distance = euclidean_distance(node_a, node_b)
+        if label_mode == "Travel time":
+            return f"t={travel_time:.2f}"
+        if label_mode == "Distance + time":
+            return f"d={distance:.2f}<br>t={travel_time:.2f}"
+        return f"d={distance:.2f}"
+
+    fig = go.Figure()
+    truck_x = list(range(len(route)))
+    truck_y = [0.0] * len(route)
+
+    # Continuous horizontal truck route.
+    fig.add_trace(go.Scatter(
+        x=truck_x,
+        y=truck_y,
+        mode="lines",
+        name="Truck route",
+        line=dict(width=4, color="#1f77b4"),
+        hoverinfo="skip",
+    ))
+
+    # Truck edge labels. Alternate their vertical offset to reduce overlap.
+    for edge_index in range(len(route) - 1):
+        node_a = route[edge_index]
+        node_b = route[edge_index + 1]
+        midpoint_x = edge_index + 0.5
+        label_y = -0.42 if edge_index % 2 == 0 else -0.72
+        label = edge_label(node_a, node_b, float(t_matrix[node_a][node_b]))
+        fig.add_annotation(
+            x=midpoint_x,
+            y=label_y,
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color="#1f77b4"),
+            bgcolor="rgba(255,255,255,0.85)",
+            borderpad=2,
+        )
+
+    # Truck nodes: customer number inside a circle; depot is still shown as 0.
+    truck_hover = []
+    for node in route:
+        x_coord, y_coord = coordinates.get(node, (np.nan, np.nan))
+        role = "Depot" if node == 0 else "Truck customer / launch-rendezvous candidate"
+        truck_hover.append(
+            f"Node {node}<br>Role: {role}<br>Coordinate: ({x_coord:.4f}, {y_coord:.4f})"
+        )
+
+    fig.add_trace(go.Scatter(
+        x=truck_x,
+        y=truck_y,
+        mode="markers+text",
+        name="Truck node",
+        text=[str(node) for node in route],
+        textposition="middle center",
+        hovertext=truck_hover,
+        hoverinfo="text",
+        marker=dict(
+            size=33,
+            color="white",
+            line=dict(width=3, color="#1f77b4"),
+            symbol="circle",
+        ),
+        textfont=dict(size=11, color="black"),
+    ))
+
+    maximum_y = 1.0
+    valid_trip_count = 0
+
+    for trip_number, (launch, drone_customer, rendezvous) in enumerate(trips, start=1):
+        launch_index = route_index(launch, rendezvous=False)
+        rendezvous_index = route_index(rendezvous, rendezvous=True)
+
+        if launch_index < 0 or rendezvous_index < 0 or launch_index >= rendezvous_index:
+            # Keep the application usable even if a malformed trip is supplied.
+            continue
+
+        span = rendezvous_index - launch_index
+        lane = valid_trip_count % 3
+        drone_y = 1.85 + 0.65 * lane + min(1.25, 0.08 * span)
+        drone_x = (launch_index + rendezvous_index) / 2.0
+        maximum_y = max(maximum_y, drone_y)
+        valid_trip_count += 1
+
+        # Two drone legs: launch -> customer -> rendezvous.
+        fig.add_trace(go.Scatter(
+            x=[launch_index, drone_x, rendezvous_index],
+            y=[0.0, drone_y, 0.0],
+            mode="lines",
+            name="Drone trip" if trip_number == 1 else None,
+            showlegend=(trip_number == 1),
+            line=dict(width=3, color="#d62728", dash="dashdot"),
+            hoverinfo="skip",
+        ))
+
+        customer_coord = coordinates.get(drone_customer, (np.nan, np.nan))
+        fig.add_trace(go.Scatter(
+            x=[drone_x],
+            y=[drone_y],
+            mode="markers+text",
+            name="Drone customer" if trip_number == 1 else None,
+            showlegend=(trip_number == 1),
+            text=[str(drone_customer)],
+            textposition="middle center",
+            hovertext=[
+                f"Drone Trip {trip_number}<br>Node {drone_customer}<br>"
+                f"Coordinate: ({customer_coord[0]:.4f}, {customer_coord[1]:.4f})<br>"
+                f"Launch: {launch}<br>Rendezvous: {rendezvous}"
+            ],
+            hoverinfo="text",
+            marker=dict(
+                size=33,
+                color="white",
+                line=dict(width=3, color="#d62728"),
+                symbol="circle",
+            ),
+            textfont=dict(size=11, color="black"),
+        ))
+
+        # Drone edge labels are placed near each sloping line.
+        first_label = edge_label(
+            launch,
+            drone_customer,
+            float(d_matrix[launch][drone_customer]),
+        )
+        second_label = edge_label(
+            drone_customer,
+            rendezvous,
+            float(d_matrix[drone_customer][rendezvous]),
+        )
+
+        fig.add_annotation(
+            x=(launch_index + drone_x) / 2.0,
+            y=drone_y / 2.0 + 0.18,
+            text=first_label,
+            showarrow=False,
+            font=dict(size=10, color="#d62728"),
+            bgcolor="rgba(255,255,255,0.88)",
+            borderpad=2,
+        )
+        fig.add_annotation(
+            x=(drone_x + rendezvous_index) / 2.0,
+            y=drone_y / 2.0 + 0.18,
+            text=second_label,
+            showarrow=False,
+            font=dict(size=10, color="#d62728"),
+            bgcolor="rgba(255,255,255,0.88)",
+            borderpad=2,
+        )
+        fig.add_annotation(
+            x=drone_x,
+            y=drone_y + 0.35,
+            text=f"Drone Trip {trip_number}",
+            showarrow=False,
+            font=dict(size=10, color="#d62728"),
+        )
+
+    figure_height = max(560, int(430 + maximum_y * 70))
+    fig.update_layout(
+        title=title,
+        height=figure_height,
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        hovermode="closest",
+        dragmode="pan",
+        margin=dict(l=30, r=30, t=75, b=55),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0.0,
+        ),
+        xaxis=dict(
+            title="Truck visit order (schematic position)",
+            showgrid=True,
+            gridcolor="rgba(150,150,150,0.18)",
+            zeroline=False,
+            tickmode="linear",
+            dtick=1,
+            range=[-0.8, len(route) - 0.2],
+            fixedrange=False,
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False,
+            range=[-1.15, maximum_y + 0.9],
+            fixedrange=False,
+        ),
+    )
+
+    return fig
+
+
+# ==========================================
 # 6. INTERACTIVE MAP (PLOTLY)
 # ==========================================
 def draw_interactive_map(nodes_data, truck_route, drone_trips, title_prefix=""):
@@ -1616,6 +1856,89 @@ elif app_mode == "🗺️ Single Visualizer":
                             "⚠️ Score mismatch detected. Review the DP reconstruction and "
                             "the generated truck/drone routes."
                         )
+
+
+                    st.markdown("#### 🧭 Truck–Drone Route Structure Diagram")
+                    st.caption(
+                        "Truck nodes are arranged horizontally by visit order. Drone customers are shown above "
+                        "their launch and rendezvous nodes. The drawing is schematic; edge distances are Euclidean "
+                        "distances calculated from the original node coordinates. Use the mouse wheel to zoom and "
+                        "drag to pan."
+                    )
+
+                    diagram_col1, diagram_col2 = st.columns([1, 1])
+                    with diagram_col1:
+                        diagram_scope = st.radio(
+                            "Diagram scope",
+                            ["Full route", "Selected segment"],
+                            horizontal=True,
+                            key="brkga_route_diagram_scope",
+                        )
+                    with diagram_col2:
+                        diagram_label_mode = st.selectbox(
+                            "Edge labels",
+                            ["Distance", "Travel time", "Distance + time"],
+                            index=0,
+                            key="brkga_route_diagram_label_mode",
+                        )
+
+                    diagram_truck_route = [int(node) for node in sol['truck_route']]
+                    diagram_drone_trips = [
+                        (int(l), int(n), int(r))
+                        for l, n, r in sol['drone_trips']
+                    ]
+                    diagram_title = "Complete BRKGA Truck–Drone Route Structure"
+
+                    if diagram_scope == "Selected segment":
+                        available_segments = audit_df["Segment"].astype(int).tolist()
+                        selected_segment = st.selectbox(
+                            "Select segment",
+                            available_segments,
+                            key="brkga_route_diagram_segment",
+                        )
+                        selected_row = audit_df.loc[
+                            audit_df["Segment"].astype(int) == int(selected_segment)
+                        ].iloc[0]
+
+                        diagram_truck_route = [
+                            int(token.strip())
+                            for token in str(selected_row["Truck Segment"]).split("->")
+                        ]
+
+                        if str(selected_row["Drone Trip"]).strip() == "-":
+                            diagram_drone_trips = []
+                        else:
+                            parsed_trip = tuple(
+                                int(token.strip())
+                                for token in str(selected_row["Drone Trip"]).split("->")
+                            )
+                            diagram_drone_trips = [parsed_trip]
+
+                        diagram_title = f"BRKGA Route Structure — Segment {selected_segment}"
+
+                    route_structure_figure = draw_route_structure_schematic(
+                        parsed_data.nodes,
+                        diagram_truck_route,
+                        diagram_drone_trips,
+                        parsed_data.truck_time_matrix,
+                        parsed_data.drone_time_matrix,
+                        label_mode=diagram_label_mode,
+                        title=diagram_title,
+                    )
+
+                    st.plotly_chart(
+                        route_structure_figure,
+                        use_container_width=True,
+                        config={
+                            "scrollZoom": True,
+                            "displaylogo": False,
+                            "toImageButtonOptions": {
+                                "format": "png",
+                                "filename": "truck_drone_route_structure",
+                                "scale": 2,
+                            },
+                        },
+                    )
                 except Exception as audit_error:
                     st.error(f"Score audit could not be completed: {audit_error}")
 
