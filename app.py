@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import math
 import random
 import time
@@ -1155,16 +1156,21 @@ def draw_route_structure_schematic(
     drone_trips,
     t_matrix,
     d_matrix,
-    label_mode="Distance",
+    audit_rows=None,
     title="Truck–Drone Route Structure",
 ):
-    """Draw a schematic route: truck nodes horizontally, drone customers above."""
+    """Draw truck/drone paths and a cumulative synchronized-time strip."""
     route = [int(node) for node in truck_route]
     trips = [(int(l), int(n), int(r)) for l, n, r in drone_trips]
 
     if len(route) < 2:
         empty_fig = go.Figure()
-        empty_fig.update_layout(title=title)
+        empty_fig.update_layout(
+            title=dict(text=title, font=dict(color="#111827")),
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            font=dict(color="#111827"),
+        )
         return empty_fig
 
     coordinates = {
@@ -1186,51 +1192,60 @@ def draw_route_structure_schematic(
             return len(route) - 1 if rendezvous else 0
         return truck_position.get(node, -1)
 
-    def euclidean_distance(node_a, node_b):
-        x1, y1 = coordinates[int(node_a)]
-        x2, y2 = coordinates[int(node_b)]
-        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+    def time_label(travel_time, vehicle):
+        # T_T = truck travel time, T_D = drone travel time.
+        suffix = "T" if vehicle == "truck" else "D"
+        return f"T<sub>{suffix}</sub>={travel_time:.2f}"
 
-    def edge_label(node_a, node_b, travel_time):
-        distance = euclidean_distance(node_a, node_b)
-        if label_mode == "Travel time":
-            return f"t={travel_time:.2f}"
-        if label_mode == "Distance + time":
-            return f"d={distance:.2f}<br>t={travel_time:.2f}"
-        return f"d={distance:.2f}"
+    # Two vertically aligned panels:
+    # 1) route structure, 2) cumulative synchronized time.
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.075,
+        row_heights=[0.78, 0.22],
+    )
 
-    fig = go.Figure()
     truck_x = list(range(len(route)))
     truck_y = [0.0] * len(route)
 
     # Continuous horizontal truck route.
-    fig.add_trace(go.Scatter(
-        x=truck_x,
-        y=truck_y,
-        mode="lines",
-        name="Truck route",
-        line=dict(width=4, color="#1f77b4"),
-        hoverinfo="skip",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=truck_x,
+            y=truck_y,
+            mode="lines",
+            name="Truck route",
+            line=dict(width=4, color="#1f77b4"),
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=1,
+    )
 
-    # Truck edge labels. Alternate their vertical offset to reduce overlap.
+    # Truck edge labels show travel time, not raw distance.
     for edge_index in range(len(route) - 1):
         node_a = route[edge_index]
         node_b = route[edge_index + 1]
         midpoint_x = edge_index + 0.5
         label_y = -0.42 if edge_index % 2 == 0 else -0.72
-        label = edge_label(node_a, node_b, float(t_matrix[node_a][node_b]))
+        label = time_label(float(t_matrix[node_a][node_b]), "truck")
         fig.add_annotation(
             x=midpoint_x,
             y=label_y,
+            xref="x",
+            yref="y",
             text=label,
             showarrow=False,
             font=dict(size=10, color="#1f77b4"),
-            bgcolor="rgba(255,255,255,0.85)",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(31,119,180,0.35)",
+            borderwidth=1,
             borderpad=2,
         )
 
-    # Truck nodes: customer number inside a circle; depot is still shown as 0.
+    # Truck nodes: customer number inside a circle; depot is shown as 0.
     truck_hover = []
     for node in route:
         x_coord, y_coord = coordinates.get(node, (np.nan, np.nan))
@@ -1239,23 +1254,27 @@ def draw_route_structure_schematic(
             f"Node {node}<br>Role: {role}<br>Coordinate: ({x_coord:.4f}, {y_coord:.4f})"
         )
 
-    fig.add_trace(go.Scatter(
-        x=truck_x,
-        y=truck_y,
-        mode="markers+text",
-        name="Truck node",
-        text=[str(node) for node in route],
-        textposition="middle center",
-        hovertext=truck_hover,
-        hoverinfo="text",
-        marker=dict(
-            size=33,
-            color="white",
-            line=dict(width=3, color="#1f77b4"),
-            symbol="circle",
+    fig.add_trace(
+        go.Scatter(
+            x=truck_x,
+            y=truck_y,
+            mode="markers+text",
+            name="Truck node",
+            text=[str(node) for node in route],
+            textposition="middle center",
+            hovertext=truck_hover,
+            hoverinfo="text",
+            marker=dict(
+                size=33,
+                color="white",
+                line=dict(width=3, color="#1f77b4"),
+                symbol="circle",
+            ),
+            textfont=dict(size=11, color="#111827"),
         ),
-        textfont=dict(size=11, color="black"),
-    ))
+        row=1,
+        col=1,
+    )
 
     maximum_y = 1.0
     valid_trip_count = 0
@@ -1265,7 +1284,6 @@ def draw_route_structure_schematic(
         rendezvous_index = route_index(rendezvous, rendezvous=True)
 
         if launch_index < 0 or rendezvous_index < 0 or launch_index >= rendezvous_index:
-            # Keep the application usable even if a malformed trip is supplied.
             continue
 
         span = rendezvous_index - launch_index
@@ -1276,112 +1294,266 @@ def draw_route_structure_schematic(
         valid_trip_count += 1
 
         # Two drone legs: launch -> customer -> rendezvous.
-        fig.add_trace(go.Scatter(
-            x=[launch_index, drone_x, rendezvous_index],
-            y=[0.0, drone_y, 0.0],
-            mode="lines",
-            name="Drone trip" if trip_number == 1 else None,
-            showlegend=(trip_number == 1),
-            line=dict(width=3, color="#d62728", dash="dashdot"),
-            hoverinfo="skip",
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[launch_index, drone_x, rendezvous_index],
+                y=[0.0, drone_y, 0.0],
+                mode="lines",
+                name="Drone trip" if trip_number == 1 else None,
+                showlegend=(trip_number == 1),
+                line=dict(width=3, color="#d62728", dash="dashdot"),
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
 
         customer_coord = coordinates.get(drone_customer, (np.nan, np.nan))
-        fig.add_trace(go.Scatter(
-            x=[drone_x],
-            y=[drone_y],
-            mode="markers+text",
-            name="Drone customer" if trip_number == 1 else None,
-            showlegend=(trip_number == 1),
-            text=[str(drone_customer)],
-            textposition="middle center",
-            hovertext=[
-                f"Drone Trip {trip_number}<br>Node {drone_customer}<br>"
-                f"Coordinate: ({customer_coord[0]:.4f}, {customer_coord[1]:.4f})<br>"
-                f"Launch: {launch}<br>Rendezvous: {rendezvous}"
-            ],
-            hoverinfo="text",
-            marker=dict(
-                size=33,
-                color="white",
-                line=dict(width=3, color="#d62728"),
-                symbol="circle",
+        fig.add_trace(
+            go.Scatter(
+                x=[drone_x],
+                y=[drone_y],
+                mode="markers+text",
+                name="Drone customer" if trip_number == 1 else None,
+                showlegend=(trip_number == 1),
+                text=[str(drone_customer)],
+                textposition="middle center",
+                hovertext=[
+                    f"Drone Trip {trip_number}<br>Node {drone_customer}<br>"
+                    f"Coordinate: ({customer_coord[0]:.4f}, {customer_coord[1]:.4f})<br>"
+                    f"Launch: {launch}<br>Rendezvous: {rendezvous}"
+                ],
+                hoverinfo="text",
+                marker=dict(
+                    size=33,
+                    color="white",
+                    line=dict(width=3, color="#d62728"),
+                    symbol="circle",
+                ),
+                textfont=dict(size=11, color="#111827"),
             ),
-            textfont=dict(size=11, color="black"),
-        ))
-
-        # Drone edge labels are placed near each sloping line.
-        first_label = edge_label(
-            launch,
-            drone_customer,
-            float(d_matrix[launch][drone_customer]),
+            row=1,
+            col=1,
         )
-        second_label = edge_label(
-            drone_customer,
-            rendezvous,
+
+        # Drone edge labels also show factor-adjusted travel time.
+        first_label = time_label(
+            float(d_matrix[launch][drone_customer]),
+            "drone",
+        )
+        second_label = time_label(
             float(d_matrix[drone_customer][rendezvous]),
+            "drone",
         )
 
         fig.add_annotation(
             x=(launch_index + drone_x) / 2.0,
             y=drone_y / 2.0 + 0.18,
+            xref="x",
+            yref="y",
             text=first_label,
             showarrow=False,
             font=dict(size=10, color="#d62728"),
-            bgcolor="rgba(255,255,255,0.88)",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(214,39,40,0.35)",
+            borderwidth=1,
             borderpad=2,
         )
         fig.add_annotation(
             x=(drone_x + rendezvous_index) / 2.0,
             y=drone_y / 2.0 + 0.18,
+            xref="x",
+            yref="y",
             text=second_label,
             showarrow=False,
             font=dict(size=10, color="#d62728"),
-            bgcolor="rgba(255,255,255,0.88)",
+            bgcolor="rgba(255,255,255,0.94)",
+            bordercolor="rgba(214,39,40,0.35)",
+            borderwidth=1,
             borderpad=2,
         )
         fig.add_annotation(
             x=drone_x,
             y=drone_y + 0.35,
+            xref="x",
+            yref="y",
             text=f"Drone Trip {trip_number}",
             showarrow=False,
             font=dict(size=10, color="#d62728"),
+            bgcolor="rgba(255,255,255,0.84)",
+            borderpad=1,
         )
 
-    figure_height = max(560, int(430 + maximum_y * 70))
+    # --------------------------------------------------------------
+    # Bottom strip: cumulative synchronized time, accumulated segment
+    # by segment using the exact audit table values.
+    # --------------------------------------------------------------
+    records = []
+    if audit_rows is not None:
+        if hasattr(audit_rows, "to_dict"):
+            records = audit_rows.to_dict("records")
+        else:
+            records = list(audit_rows)
+
+    cumulative_x = [0.0]
+    cumulative_y = [0.0]
+    cumulative_text = ["0.00"]
+    cumulative_hover = ["Start<br>Cumulative T = 0.00"]
+    search_cursor = 0
+
+    for record in records:
+        try:
+            truck_nodes = [
+                int(token.strip())
+                for token in str(record["Truck Segment"]).split("->")
+            ]
+            end_node = truck_nodes[-1]
+            if end_node == 0:
+                end_index = len(route) - 1
+            else:
+                end_index = -1
+                for candidate_index in range(search_cursor + 1, len(route)):
+                    if int(route[candidate_index]) == end_node:
+                        end_index = candidate_index
+                        break
+                if end_index < 0:
+                    end_index = route_index(end_node, rendezvous=False)
+
+            if end_index < 0:
+                continue
+
+            search_cursor = max(search_cursor, end_index)
+            segment_number = int(record["Segment"])
+            segment_cost = float(record["Segment Cost"])
+            cumulative_cost = float(record["Cumulative Cost"])
+
+            cumulative_x.append(float(end_index))
+            cumulative_y.append(cumulative_cost)
+            cumulative_text.append(f"{cumulative_cost:.2f}")
+            cumulative_hover.append(
+                f"Segment {segment_number}<br>"
+                f"Segment T = {segment_cost:.4f}<br>"
+                f"Cumulative T = {cumulative_cost:.4f}"
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if len(cumulative_x) > 1:
+        fig.add_trace(
+            go.Scatter(
+                x=cumulative_x,
+                y=cumulative_y,
+                mode="lines+markers+text",
+                name="Cumulative synchronized time",
+                line=dict(width=3, color="#7c3aed", shape="hv"),
+                marker=dict(size=8, color="#7c3aed"),
+                text=cumulative_text,
+                textposition="top center",
+                textfont=dict(size=10, color="#4c1d95"),
+                hovertext=cumulative_hover,
+                hoverinfo="text",
+                showlegend=True,
+            ),
+            row=2,
+            col=1,
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="x2 domain",
+            yref="y2 domain",
+            text="Cumulative timing data is unavailable for this view.",
+            showarrow=False,
+            font=dict(size=11, color="#475569"),
+        )
+
+    figure_height = max(720, int(565 + maximum_y * 65))
     fig.update_layout(
-        title=title,
+        title=dict(
+            text=title,
+            x=0.01,
+            xanchor="left",
+            font=dict(size=20, color="#111827"),
+        ),
         height=figure_height,
         plot_bgcolor="white",
         paper_bgcolor="white",
+        font=dict(color="#111827"),
         hovermode="closest",
         dragmode="pan",
-        margin=dict(l=30, r=30, t=75, b=55),
+        hoverlabel=dict(bgcolor="white", font=dict(color="#111827")),
+        margin=dict(l=55, r=35, t=92, b=60),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
+            y=1.015,
             xanchor="left",
             x=0.0,
-        ),
-        xaxis=dict(
-            title="Truck visit order (schematic position)",
-            showgrid=True,
-            gridcolor="rgba(150,150,150,0.18)",
-            zeroline=False,
-            tickmode="linear",
-            dtick=1,
-            range=[-0.8, len(route) - 0.2],
-            fixedrange=False,
-        ),
-        yaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False,
-            range=[-1.15, maximum_y + 0.9],
-            fixedrange=False,
+            font=dict(color="#111827", size=11),
+            bgcolor="rgba(255,255,255,0.96)",
+            bordercolor="rgba(15,23,42,0.20)",
+            borderwidth=1,
         ),
     )
+
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor="rgba(100,116,139,0.17)",
+        zeroline=False,
+        tickmode="linear",
+        dtick=1,
+        range=[-0.8, len(route) - 0.2],
+        fixedrange=False,
+        tickfont=dict(color="#334155"),
+        row=1,
+        col=1,
+    )
+    fig.update_yaxes(
+        showgrid=False,
+        zeroline=False,
+        showticklabels=False,
+        range=[-1.15, maximum_y + 0.9],
+        fixedrange=False,
+        row=1,
+        col=1,
+    )
+
+    fig.update_xaxes(
+        title=dict(
+            text="Truck visit order (schematic position)",
+            font=dict(color="#111827"),
+        ),
+        showgrid=True,
+        gridcolor="rgba(100,116,139,0.17)",
+        zeroline=False,
+        tickmode="linear",
+        dtick=1,
+        range=[-0.8, len(route) - 0.2],
+        tickfont=dict(color="#334155"),
+        fixedrange=False,
+        row=2,
+        col=1,
+    )
+    fig.update_yaxes(
+        title=dict(text="Cumulative T", font=dict(color="#111827")),
+        showgrid=True,
+        gridcolor="rgba(100,116,139,0.17)",
+        zeroline=True,
+        zerolinecolor="rgba(100,116,139,0.35)",
+        tickfont=dict(color="#334155"),
+        fixedrange=False,
+        rangemode="tozero",
+        row=2,
+        col=1,
+    )
+
+    # Explicitly recolor all automatically generated subplot annotations.
+    for annotation in fig.layout.annotations:
+        if annotation.font is None:
+            annotation.font = dict(color="#111827")
+        elif not annotation.font.color:
+            annotation.font.color = "#111827"
 
     return fig
 
@@ -1859,34 +2031,35 @@ elif app_mode == "🗺️ Single Visualizer":
 
 
                     st.markdown("#### 🧭 Truck–Drone Route Structure Diagram")
+                    truck_factor = float(parsed_data.truck_speed)
+                    drone_factor = float(parsed_data.drone_speed)
+                    relative_drone_speed = (
+                        truck_factor / drone_factor
+                        if drone_factor > 0
+                        else float("inf")
+                    )
                     st.caption(
-                        "Truck nodes are arranged horizontally by visit order. Drone customers are shown above "
-                        "their launch and rendezvous nodes. The drawing is schematic; edge distances are Euclidean "
-                        "distances calculated from the original node coordinates. Use the mouse wheel to zoom and "
-                        "drag to pan."
+                        "Truck nodes are arranged horizontally by visit order and drone customers are shown above "
+                        "their launch and rendezvous nodes. Every edge label is travel time T, already adjusted by "
+                        "the corresponding travel-time factor: T = Euclidean distance × factor. Therefore, a drone "
+                        f"factor of {drone_factor:g} versus a truck factor of {truck_factor:g} represents "
+                        f"approximately {relative_drone_speed:g}× effective drone speed. The lower panel adds the "
+                        "synchronized segment costs cumulatively. Use the mouse wheel to zoom and drag to pan."
                     )
 
-                    diagram_col1, diagram_col2 = st.columns([1, 1])
-                    with diagram_col1:
-                        diagram_scope = st.radio(
-                            "Diagram scope",
-                            ["Full route", "Selected segment"],
-                            horizontal=True,
-                            key="brkga_route_diagram_scope",
-                        )
-                    with diagram_col2:
-                        diagram_label_mode = st.selectbox(
-                            "Edge labels",
-                            ["Distance", "Travel time", "Distance + time"],
-                            index=0,
-                            key="brkga_route_diagram_label_mode",
-                        )
+                    diagram_scope = st.radio(
+                        "Diagram scope",
+                        ["Full route", "Selected segment"],
+                        horizontal=True,
+                        key="brkga_route_diagram_scope",
+                    )
 
                     diagram_truck_route = [int(node) for node in sol['truck_route']]
                     diagram_drone_trips = [
                         (int(l), int(n), int(r))
                         for l, n, r in sol['drone_trips']
                     ]
+                    diagram_audit_rows = audit_df.copy()
                     diagram_title = "Complete BRKGA Truck–Drone Route Structure"
 
                     if diagram_scope == "Selected segment":
@@ -1914,6 +2087,12 @@ elif app_mode == "🗺️ Single Visualizer":
                             )
                             diagram_drone_trips = [parsed_trip]
 
+                        # In a single-segment view the lower strip starts at zero
+                        # and ends at that segment's synchronized cost.
+                        diagram_audit_rows = selected_row.to_frame().T.copy()
+                        diagram_audit_rows["Cumulative Cost"] = diagram_audit_rows[
+                            "Segment Cost"
+                        ].astype(float)
                         diagram_title = f"BRKGA Route Structure — Segment {selected_segment}"
 
                     route_structure_figure = draw_route_structure_schematic(
@@ -1922,7 +2101,7 @@ elif app_mode == "🗺️ Single Visualizer":
                         diagram_drone_trips,
                         parsed_data.truck_time_matrix,
                         parsed_data.drone_time_matrix,
-                        label_mode=diagram_label_mode,
+                        audit_rows=diagram_audit_rows,
                         title=diagram_title,
                     )
 
