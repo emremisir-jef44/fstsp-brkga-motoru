@@ -969,6 +969,145 @@ def calculate_wait_times(truck_route, drone_trips, t_matrix, d_matrix):
     return truck_wait, drone_wait
 
 
+
+
+def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
+    """Recalculate the BRKGA makespan segment by segment for auditing."""
+    route = [int(node) for node in truck_route]
+
+    # Customer positions on the truck route. Depot 0 is handled separately
+    # because it appears at both the beginning and the end of the route.
+    positions = {
+        int(node): index
+        for index, node in enumerate(route)
+        if int(node) != 0
+    }
+
+    prepared_trips = []
+    for launch, customer, rendezvous in drone_trips:
+        launch = int(launch)
+        customer = int(customer)
+        rendezvous = int(rendezvous)
+
+        launch_index = 0 if launch == 0 else positions.get(launch, -1)
+        rendezvous_index = (
+            len(route) - 1
+            if rendezvous == 0
+            else positions.get(rendezvous, -1)
+        )
+
+        if launch_index == -1 or rendezvous_index == -1:
+            raise ValueError(
+                f"Drone trip ({launch}, {customer}, {rendezvous}) contains "
+                "a launch or rendezvous node that is not on the truck route."
+            )
+        if launch_index >= rendezvous_index:
+            raise ValueError(
+                f"Drone trip ({launch}, {customer}, {rendezvous}) has an "
+                "invalid launch/rendezvous order."
+            )
+
+        prepared_trips.append(
+            (
+                launch_index,
+                rendezvous_index,
+                launch,
+                customer,
+                rendezvous,
+            )
+        )
+
+    prepared_trips.sort(key=lambda item: (item[0], item[1]))
+
+    rows = []
+    total = 0.0
+    route_index = 0
+    trip_index = 0
+    segment_number = 1
+
+    while route_index < len(route) - 1:
+        has_drone_trip = (
+            trip_index < len(prepared_trips)
+            and prepared_trips[trip_index][0] == route_index
+        )
+
+        if has_drone_trip:
+            (
+                launch_index,
+                rendezvous_index,
+                launch,
+                customer,
+                rendezvous,
+            ) = prepared_trips[trip_index]
+
+            truck_nodes = route[launch_index:rendezvous_index + 1]
+            truck_time = sum(
+                t_matrix[route[k]][route[k + 1]]
+                for k in range(launch_index, rendezvous_index)
+            )
+            drone_time = (
+                d_matrix[launch][customer]
+                + d_matrix[customer][rendezvous]
+            )
+            segment_cost = max(truck_time, drone_time)
+
+            if truck_time > drone_time:
+                waiting_vehicle = "Drone"
+                waiting_time = truck_time - drone_time
+            elif drone_time > truck_time:
+                waiting_vehicle = "Truck"
+                waiting_time = drone_time - truck_time
+            else:
+                waiting_vehicle = "None"
+                waiting_time = 0.0
+
+            total += segment_cost
+            rows.append({
+                "Segment": segment_number,
+                "Type": "Truck + Drone",
+                "Truck Segment": " -> ".join(map(str, truck_nodes)),
+                "Drone Trip": f"{launch} -> {customer} -> {rendezvous}",
+                "Truck Time": float(truck_time),
+                "Drone Time": float(drone_time),
+                "Waiting Vehicle": waiting_vehicle,
+                "Waiting Time": float(waiting_time),
+                "Segment Cost": float(segment_cost),
+                "Cumulative Cost": float(total),
+            })
+
+            route_index = rendezvous_index
+            trip_index += 1
+        else:
+            start = route[route_index]
+            end = route[route_index + 1]
+            truck_time = float(t_matrix[start][end])
+            total += truck_time
+
+            rows.append({
+                "Segment": segment_number,
+                "Type": "Truck Only",
+                "Truck Segment": f"{start} -> {end}",
+                "Drone Trip": "-",
+                "Truck Time": truck_time,
+                "Drone Time": 0.0,
+                "Waiting Vehicle": "None",
+                "Waiting Time": 0.0,
+                "Segment Cost": truck_time,
+                "Cumulative Cost": float(total),
+            })
+
+            route_index += 1
+
+        segment_number += 1
+
+    if trip_index != len(prepared_trips):
+        raise ValueError(
+            "At least one drone trip could not be matched to the truck route."
+        )
+
+    return float(total), pd.DataFrame(rows)
+
+
 # ==========================================
 # 6. INTERACTIVE MAP (PLOTLY)
 # ==========================================
@@ -1361,6 +1500,69 @@ elif app_mode == "🗺️ Single Visualizer":
                 
                 for i, t_trip in enumerate(sorted_d_trips):
                     st.write(f"**Drone Trip {i+1}:** Node {t_trip[0]} ➔ **Visit {t_trip[1]}** ➔ Node {t_trip[2]}")
+
+                st.subheader("🔎 Score Calculation Audit")
+                st.caption(
+                    "The table below reconstructs the reported makespan segment by segment. "
+                    "For a truck-drone segment, the segment cost is max(Truck Time, Drone Time)."
+                )
+
+                try:
+                    audit_total, audit_df = audit_makespan(
+                        sol['truck_route'],
+                        sol['drone_trips'],
+                        parsed_data.truck_time_matrix,
+                        parsed_data.drone_time_matrix,
+                    )
+
+                    if sol['drone_trips']:
+                        audit_drone_array = np.array(sol['drone_trips'], dtype=np.int32).reshape(-1, 3)
+                    else:
+                        audit_drone_array = np.zeros((0, 3), dtype=np.int32)
+
+                    independent_score = fast_eval_hgvns(
+                        np.array(sol['truck_route'], dtype=np.int32),
+                        audit_drone_array,
+                        parsed_data.truck_time_matrix,
+                        parsed_data.drone_time_matrix,
+                        parsed_data.num_nodes,
+                        parsed_data.max_fly,
+                    )
+
+                    reported_score = float(sol['fitness'])
+                    audit_difference = abs(reported_score - audit_total)
+                    evaluator_difference = abs(reported_score - independent_score)
+
+                    a1, a2, a3, a4 = st.columns(4)
+                    a1.metric("Reported Score", f"{reported_score:.6f}")
+                    a2.metric("Segment Audit", f"{audit_total:.6f}")
+                    a3.metric("Independent Evaluator", f"{independent_score:.6f}")
+                    a4.metric("Maximum Difference", f"{max(audit_difference, evaluator_difference):.10f}")
+
+                    display_audit_df = audit_df.copy()
+                    numeric_columns = [
+                        "Truck Time",
+                        "Drone Time",
+                        "Waiting Time",
+                        "Segment Cost",
+                        "Cumulative Cost",
+                    ]
+                    display_audit_df[numeric_columns] = display_audit_df[numeric_columns].round(4)
+                    st.dataframe(display_audit_df, use_container_width=True, hide_index=True)
+
+                    if audit_difference < 1e-6 and evaluator_difference < 1e-6:
+                        st.success(
+                            "✅ The reported score matches both the segment-by-segment audit "
+                            "and the independent route evaluator."
+                        )
+                    else:
+                        st.error(
+                            "⚠️ Score mismatch detected. Review the DP reconstruction and "
+                            "the generated truck/drone routes."
+                        )
+                except Exception as audit_error:
+                    st.error(f"Score audit could not be completed: {audit_error}")
+
 
             elif solver_type == "HGVNS (Paper Replica)":
                 st.subheader("🟥 HGVNS Engine Results")
