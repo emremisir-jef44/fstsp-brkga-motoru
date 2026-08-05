@@ -971,8 +971,8 @@ def calculate_wait_times(truck_route, drone_trips, t_matrix, d_matrix):
 
 
 
-def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
-    """Recalculate the BRKGA makespan segment by segment for auditing."""
+def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix, nodes_data):
+    """Recalculate the BRKGA makespan and list coordinates for every segment node."""
     route = [int(node) for node in truck_route]
 
     # Customer positions on the truck route. Depot 0 is handled separately
@@ -1020,6 +1020,25 @@ def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
     prepared_trips.sort(key=lambda item: (item[0], item[1]))
 
     rows = []
+    coordinate_rows = []
+    node_coordinates = {
+        int(node_id): (float(x_coord), float(y_coord))
+        for node_id, x_coord, y_coord in nodes_data
+    }
+
+    def add_coordinate_row(segment, path, order, role, node_id):
+        """Add one node occurrence to the coordinate audit table."""
+        x_coord, y_coord = node_coordinates.get(int(node_id), (np.nan, np.nan))
+        coordinate_rows.append({
+            "Segment": int(segment),
+            "Path": path,
+            "Order": int(order),
+            "Role": role,
+            "Node": int(node_id),
+            "X Coordinate": float(x_coord),
+            "Y Coordinate": float(y_coord),
+        })
+
     total = 0.0
     route_index = 0
     trip_index = 0
@@ -1075,6 +1094,21 @@ def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
                 "Cumulative Cost": float(total),
             })
 
+            # Record every truck node and every drone node with its coordinates.
+            for order, node_id in enumerate(truck_nodes, start=1):
+                if order == 1:
+                    role = "Launch / Truck Start"
+                elif order == len(truck_nodes):
+                    role = "Rendezvous / Truck End"
+                else:
+                    role = "Truck Visit"
+                add_coordinate_row(segment_number, "Truck", order, role, node_id)
+
+            drone_nodes = [launch, customer, rendezvous]
+            drone_roles = ["Launch", "Drone Customer", "Rendezvous"]
+            for order, (node_id, role) in enumerate(zip(drone_nodes, drone_roles), start=1):
+                add_coordinate_row(segment_number, "Drone", order, role, node_id)
+
             route_index = rendezvous_index
             trip_index += 1
         else:
@@ -1096,6 +1130,9 @@ def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
                 "Cumulative Cost": float(total),
             })
 
+            add_coordinate_row(segment_number, "Truck", 1, "Truck Start", start)
+            add_coordinate_row(segment_number, "Truck", 2, "Truck End", end)
+
             route_index += 1
 
         segment_number += 1
@@ -1105,7 +1142,8 @@ def audit_makespan(truck_route, drone_trips, t_matrix, d_matrix):
             "At least one drone trip could not be matched to the truck route."
         )
 
-    return float(total), pd.DataFrame(rows)
+    coordinate_df = pd.DataFrame(coordinate_rows)
+    return float(total), pd.DataFrame(rows), coordinate_df
 
 
 # ==========================================
@@ -1508,11 +1546,12 @@ elif app_mode == "🗺️ Single Visualizer":
                 )
 
                 try:
-                    audit_total, audit_df = audit_makespan(
+                    audit_total, audit_df, coordinate_df = audit_makespan(
                         sol['truck_route'],
                         sol['drone_trips'],
                         parsed_data.truck_time_matrix,
                         parsed_data.drone_time_matrix,
+                        parsed_data.nodes,
                     )
 
                     if sol['drone_trips']:
@@ -1549,6 +1588,23 @@ elif app_mode == "🗺️ Single Visualizer":
                     ]
                     display_audit_df[numeric_columns] = display_audit_df[numeric_columns].round(4)
                     st.dataframe(display_audit_df, use_container_width=True, hide_index=True)
+
+                    st.markdown("#### 📍 Segment Node Coordinates")
+                    st.caption(
+                        "Each row shows where a node appears inside a truck or drone path. "
+                        "Launch and rendezvous nodes are listed in both paths because both vehicles use them."
+                    )
+                    display_coordinate_df = coordinate_df.copy()
+                    coordinate_numeric_columns = ["X Coordinate", "Y Coordinate"]
+                    display_coordinate_df[coordinate_numeric_columns] = (
+                        display_coordinate_df[coordinate_numeric_columns].round(4)
+                    )
+                    st.dataframe(
+                        display_coordinate_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=420,
+                    )
 
                     if audit_difference < 1e-6 and evaluator_difference < 1e-6:
                         st.success(
